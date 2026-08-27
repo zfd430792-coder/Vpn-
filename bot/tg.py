@@ -1,14 +1,13 @@
 import asyncio
 import os
 import time
-from typing import Optional
+from typing import List, Optional
 
 import aiohttp
 
-from .outbound import from_clash_proxies, from_uris
+from .loader import fetch_and_load
 from .report import fmt_bytes, units_to_bytes
 from .singbox import SingBox, build_config
-from .subscription import fetch, parse
 from .traffic import BIG_FILES, Counter, burn
 
 
@@ -22,16 +21,6 @@ HELP = (
     "/limit 100GB — задать лимит для следующего запуска (0 = без лимита)\n"
     "/help — эта справка"
 )
-
-
-def _load_outbounds(body: str) -> list:
-    parsed = parse(body)
-    if parsed["kind"] == "uris":
-        return from_uris(parsed["uris"])
-    if parsed["kind"] == "clash":
-        return from_clash_proxies(parsed["proxies"])
-    skip = {"selector", "urltest", "direct", "block", "dns"}
-    return [o for o in parsed["config"].get("outbounds", []) if o.get("type") not in skip]
 
 
 def _extract_url(text: str) -> Optional[str]:
@@ -58,12 +47,11 @@ class BurnSession:
     def running(self) -> bool:
         return self.burn_task is not None and not self.burn_task.done()
 
-    async def start(self, body: str, limit_bytes: int) -> int:
+    async def start(self, outbounds: List[dict], limit_bytes: int) -> int:
         if self.running():
             raise RuntimeError("уже запущена — сначала /stop")
-        outbounds = _load_outbounds(body)
         if not outbounds:
-            raise RuntimeError("в подписке не нашлось поддерживаемых нод")
+            raise RuntimeError("нет реальных нод")
         config = build_config(outbounds, socks_port=self.port)
         self.box = SingBox(binary=self.singbox_bin)
         self.box.start(config, socks_port=self.port)
@@ -72,7 +60,7 @@ class BurnSession:
         self.limit_bytes = limit_bytes
         self.started_at = time.monotonic()
         self.node_count = len(outbounds)
-        socks_url = f"socks5://127.0.0.1:{self.port}"
+        socks_url = f"socks5h://127.0.0.1:{self.port}"
         self.burn_task = asyncio.create_task(
             burn(socks_url, self.workers, limit_bytes, BIG_FILES, self.counter, self.stop_event)
         )
@@ -85,13 +73,16 @@ class BurnSession:
         rate = self.counter.bytes / elapsed
         goal = f" / {fmt_bytes(self.limit_bytes)}" if self.limit_bytes else ""
         state = "работаю" if self.running() else "остановлен"
-        return (
-            f"{state}\n"
-            f"нод: {self.node_count}\n"
-            f"съедено: {fmt_bytes(self.counter.bytes)}{goal}\n"
-            f"средняя: {fmt_bytes(rate)}/s\n"
-            f"аптайм: {int(elapsed)}с"
-        )
+        lines = [
+            state,
+            f"нод: {self.node_count}",
+            f"съедено: {fmt_bytes(self.counter.bytes)}{goal}",
+            f"средняя: {fmt_bytes(rate)}/s",
+            f"аптайм: {int(elapsed)}с",
+        ]
+        if self.counter.errors:
+            lines.append(f"ошибок: {self.counter.errors} (посл.: {self.counter.last_error[:120]})")
+        return "\n".join(lines)
 
     async def stop(self) -> None:
         if self.stop_event:
@@ -129,16 +120,29 @@ class TgClient:
 async def _run_burn(tg: TgClient, chat_id: int, session: BurnSession, sub_url: str,
                     limit_bytes: int, ua: str) -> None:
     try:
-        await tg.send(chat_id, f"качаю подписку…")
+        await tg.send(chat_id, "качаю подписку… (перебираю клиенты)")
         loop = asyncio.get_event_loop()
-        body = await loop.run_in_executor(None, lambda: fetch(sub_url, ua=ua))
-        n = await session.start(body, limit_bytes)
-        goal = f" (лимит {fmt_bytes(limit_bytes)})" if limit_bytes else ""
-        await tg.send(chat_id, f"поднято {n} нод, жру трафик{goal}. /status /stop")
+        outbounds, ua_used, raw = await loop.run_in_executor(
+            None, lambda: fetch_and_load(sub_url, ua=ua)
+        )
+    except Exception as e:
+        await tg.send(chat_id, f"ошибка загрузки подписки: {e}")
+        return
+    if not outbounds:
+        await tg.send(
+            chat_id,
+            "подписка отдала только заглушки — ни один клиент (Happ, v2rayNG, sing-box, …) "
+            f"не получил реальных нод (пустышек: {raw}). Проверь, что ссылка живая и не истекла.",
+        )
+        return
+    try:
+        n = await session.start(outbounds, limit_bytes)
     except Exception as e:
         await tg.send(chat_id, f"ошибка старта: {e}")
         await session.stop()
         return
+    goal = f" (лимит {fmt_bytes(limit_bytes)})" if limit_bytes else ""
+    await tg.send(chat_id, f"UA: {ua_used}\nподнято {n} нод, жру трафик{goal}. /status /stop")
     task = session.burn_task
     if task:
         try:

@@ -4,38 +4,35 @@ import json
 import sys
 from pathlib import Path
 
-from .outbound import from_clash_proxies, from_uris
+from .loader import fetch_and_load, outbounds_from_body
 from .report import progress, units_to_bytes
 from .singbox import SingBox, build_config
-from .subscription import fetch, parse
 from .traffic import BIG_FILES, Counter, burn
 
 
-def load_outbounds(sub_body: str) -> list:
-    parsed = parse(sub_body)
-    kind = parsed["kind"]
-    if kind == "uris":
-        return from_uris(parsed["uris"])
-    if kind == "clash":
-        return from_clash_proxies(parsed["proxies"])
-    obs = parsed["config"].get("outbounds", [])
-    skip = {"selector", "urltest", "direct", "block", "dns"}
-    return [o for o in obs if o.get("type") not in skip]
-
-
 async def run(args: argparse.Namespace) -> int:
+    ua_used = None
     if args.sub_file:
         body = Path(args.sub_file).read_text()
+        outbounds = outbounds_from_body(body)
     else:
-        body = fetch(args.sub, ua=args.ua)
+        outbounds, ua_used, raw = fetch_and_load(args.sub, ua=args.ua)
+        if not outbounds and raw:
+            print(
+                f"подписка отдаёт только заглушки (ни один User-Agent не подошёл, узлов-пустышек: {raw})",
+                file=sys.stderr,
+            )
 
-    outbounds = load_outbounds(body)
     if args.dry_run:
         print(json.dumps(outbounds, indent=2, ensure_ascii=False))
+        if ua_used:
+            print(f"# UA: {ua_used}, реальных нод: {len(outbounds)}", file=sys.stderr)
         return 0
     if not outbounds:
         print("no usable outbounds found in subscription", file=sys.stderr)
         return 1
+    if ua_used:
+        print(f"UA: {ua_used}, реальных нод: {len(outbounds)}", file=sys.stderr)
 
     files = BIG_FILES
     if args.files:
@@ -53,7 +50,7 @@ async def run(args: argparse.Namespace) -> int:
     try:
         counter = Counter()
         stop = asyncio.Event()
-        socks_url = f"socks5://127.0.0.1:{args.port}"
+        socks_url = f"socks5h://127.0.0.1:{args.port}"
         report_task = asyncio.create_task(progress(lambda: counter.bytes, args.interval, limit_bytes, stop))
         burn_task = asyncio.create_task(burn(socks_url, args.workers, limit_bytes, files, counter, stop))
         try:
@@ -80,7 +77,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--limit", default="0", help="остановиться после N трафика (100GB, 500MB, 0 = без лимита)")
     p.add_argument("--interval", type=float, default=5.0, help="секунд между строками прогресса")
     p.add_argument("--files", default="", help="файл со списком URL для качания (по строке)")
-    p.add_argument("--ua", default="v2rayN/6.42", help="User-Agent при запросе подписки")
+    p.add_argument("--ua", default="v2rayN/6.42", help="User-Agent, который пробуется первым (дальше идёт перебор)")
     p.add_argument("--log-level", default="warn", help="уровень логирования sing-box")
     p.add_argument("--dry-run", action="store_true", help="распарсить подписку и вывести outbounds")
     return p.parse_args(argv)

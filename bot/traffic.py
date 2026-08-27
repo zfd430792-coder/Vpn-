@@ -28,9 +28,15 @@ class Counter:
     def __init__(self) -> None:
         self.bytes = 0
         self.started = time.monotonic()
+        self.errors = 0
+        self.last_error = ""
 
     def add(self, n: int) -> None:
         self.bytes += n
+
+    def fail(self, msg: str) -> None:
+        self.errors += 1
+        self.last_error = msg
 
 
 async def _worker(
@@ -52,6 +58,7 @@ async def _worker(
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as sess:
                 async with sess.get(url) as resp:
                     if resp.status >= 400:
+                        counter.fail(f"HTTP {resp.status} {url}")
                         await asyncio.sleep(0.5)
                         continue
                     async for chunk in resp.content.iter_chunked(64 * 1024):
@@ -63,7 +70,8 @@ async def _worker(
                             return
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            counter.fail(f"{type(e).__name__}: {e}")
             await asyncio.sleep(1)
 
 
