@@ -1,0 +1,30 @@
+proxies:
+  - name: ClashVmess-US
+    type: vmess
+    server: cvm.example.com
+    port: 443
+    uuid: b3b4c5d6-e7f8-4901-a2b3-c4d5e6f7a8b9
+    alterId: 0
+    cipher: auto
+    network: ws
+    tls: true
+    servername: cvm.example.com
+    ws-opts:
+      path: /cws
+      headers:
+        Host: cvm.example.com
+  - name: ClashSS-DE
+    type: ss
+    server: css.example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: clashpass
+  - name: ClashTrojan-JP
+    type: trojan
+    server: ctr.example.com
+    port: 443
+    password: trpass
+    sni: ctr.example.com
+    network: ws
+    ws-opts:
+      path: /ctp

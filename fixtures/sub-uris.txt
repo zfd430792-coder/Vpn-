@@ -1,0 +1,5 @@
+vmess://eyJ2IjogIjIiLCAicHMiOiAiVGVzdFZtZXNzIiwgImFkZCI6ICJ2bS5leGFtcGxlLmNvbSIsICJwb3J0IjogIjQ0MyIsICJpZCI6ICJhM2I0YzVkNi1lN2Y4LTQ5MDEtYTJiMy1jNGQ1ZTZmN2E4YjkiLCAiYWlkIjogIjAiLCAic2N5IjogImF1dG8iLCAibmV0IjogIndzIiwgInR5cGUiOiAibm9uZSIsICJob3N0IjogInZtLmV4YW1wbGUuY29tIiwgInBhdGgiOiAiL3ZtIiwgInRscyI6ICJ0bHMiLCAic25pIjogInZtLmV4YW1wbGUuY29tIn0=
+vless://11111111-2222-3333-4444-555555555555@vl.example.com:443?encryption=none&security=tls&sni=vl.example.com&type=ws&path=%2Fws&host=vl.example.com#TestVless
+trojan://mysecret@tr.example.com:443?security=tls&sni=tr.example.com&type=tcp#TestTrojan
+ss://YWVzLTI1Ni1nY206bXlwYXNzd29yZA==@ss.example.com:8388#TestSS
+hy2://hypass@hy.example.com:443?insecure=0&sni=hy.example.com#TestHy2
