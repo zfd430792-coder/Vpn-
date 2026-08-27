@@ -5,27 +5,10 @@ import sys
 from pathlib import Path
 
 from .outbound import from_clash_proxies, from_uris
-from .report import progress
+from .report import progress, units_to_bytes
 from .singbox import SingBox, build_config
 from .subscription import fetch, parse
 from .traffic import BIG_FILES, Counter, burn
-
-
-UNIT_SUFFIXES = [
-    ("tb", 1024 ** 4), ("gb", 1024 ** 3), ("mb", 1024 ** 2), ("kb", 1024),
-    ("t", 1024 ** 4), ("g", 1024 ** 3), ("m", 1024 ** 2), ("k", 1024),
-    ("b", 1),
-]
-
-
-def units_to_bytes(s: str) -> int:
-    s = (s or "").strip().lower()
-    if not s or s in ("0", "none", "unlimited", "inf"):
-        return 0
-    for suffix, mult in UNIT_SUFFIXES:
-        if s.endswith(suffix):
-            return int(float(s[: -len(suffix)]) * mult)
-    return int(float(s))
 
 
 def load_outbounds(sub_body: str) -> list:

@@ -11,6 +11,23 @@ def fmt_bytes(value: float) -> str:
     return f"{value:.2f} PiB"
 
 
+_UNIT_SUFFIXES = [
+    ("tb", 1024 ** 4), ("gb", 1024 ** 3), ("mb", 1024 ** 2), ("kb", 1024),
+    ("t", 1024 ** 4), ("g", 1024 ** 3), ("m", 1024 ** 2), ("k", 1024),
+    ("b", 1),
+]
+
+
+def units_to_bytes(s: str) -> int:
+    s = (s or "").strip().lower()
+    if not s or s in ("0", "none", "unlimited", "inf"):
+        return 0
+    for suffix, mult in _UNIT_SUFFIXES:
+        if s.endswith(suffix):
+            return int(float(s[: -len(suffix)]) * mult)
+    return int(float(s))
+
+
 async def progress(get_bytes: Callable[[], int], interval: float, limit_bytes: int, stop: asyncio.Event) -> None:
     prev = get_bytes()
     prev_t = time.monotonic()

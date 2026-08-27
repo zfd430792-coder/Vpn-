@@ -4,91 +4,104 @@
 парсит ноды (base64 со списком URI, Clash YAML или готовый sing-box JSON),
 поднимает локальный `sing-box` с mixed inbound на `127.0.0.1:10808`
 и запускает пачку асинхронных воркеров, качающих большие файлы через
-SOCKS в `/dev/null`, пока не будет достигнут лимит трафика.
+SOCKS в `/dev/null`, пока не будет достигнут лимит.
 
-## Что понимает
+Два режима работы:
 
-Подписка:
-- строка base64 со списком `vmess://`, `vless://`, `trojan://`, `ss://`, `hy2://`
-- Clash / mihomo YAML (ключ `proxies:`, типы `ss/vmess/vless/trojan/hysteria2`)
-- сырой sing-box JSON с ключом `outbounds`
+- **CLI** — прямой запуск: подаёшь URL подписки флагом, смотришь прогресс в терминале.
+- **Telegram-бот** — сидит демоном; кидаешь в лички боту URL подписки, он жрёт; команды `/status`, `/stop`, `/limit`.
 
-Протоколы outbound'ов, генерируемых для sing-box: VMess (+WS/gRPC/TLS),
-VLESS (+WS/gRPC/TLS/Reality/uTLS), Trojan (+WS/TLS), Shadowsocks, Hysteria2.
+## Одна команда на сервер (Telegram-бот + systemd)
 
-## Требования
+Ubuntu/Debian, CentOS/RHEL, Alpine, под root. Токен передаётся env-переменной:
 
-- Python 3.10+
-- Установленный `sing-box` в PATH (или путь через `--singbox`).
-  Как поставить: https://sing-box.sagernet.org/installation/
+    curl -fsSL https://raw.githubusercontent.com/zfd430792-coder/Vpn-/claude/traffic-consuming-bot-iuxyrf/install.sh \
+      | sudo TELEGRAM_BOT_TOKEN='ТУТ_ТВОЙ_ТОКЕН' bash
 
-## Установка
+Что делает `install.sh`:
+
+1. ставит `python3`/`git`/`curl`/`tar` под текущий пакетный менеджер;
+2. качает статический бинарник `sing-box` с GitHub releases в `/usr/local/bin`;
+3. клонирует репо в `/opt/vpn-traffic-bot`, делает venv, ставит зависимости;
+4. пишет `/etc/vpn-traffic-bot/env` (0600) с токеном и параметрами;
+5. создаёт systemd-юнит `vpn-traffic-bot.service`, включает и запускает.
+
+После установки:
+
+    journalctl -u vpn-traffic-bot -f     # лог
+    systemctl status vpn-traffic-bot     # статус
+    systemctl restart vpn-traffic-bot    # рестарт
+
+Переменные (можно перекрыть перед запуском `install.sh`):
+
+- `WORKERS` — параллельных загрузок (32)
+- `DEFAULT_LIMIT` — лимит по умолчанию, `100GB`/`500MB`/`0` без лимита
+- `SOCKS_PORT` — локальный порт (10808)
+- `TELEGRAM_ALLOWED_CHATS` — CSV chat_id, кому можно писать боту (пусто = всем)
+
+## Работа с ботом в Telegram
+
+- пришли ему URL подписки → сам скачает, распарсит, начнёт есть трафик
+- `/status` — сколько уже съедено, средняя скорость, аптайм
+- `/stop` — остановить
+- `/limit 100GB` — лимит перед следующей подпиской (0 = без лимита)
+- `/help` — справка
+
+## Ручной запуск CLI
 
     python3 -m venv .venv
     .venv/bin/pip install -r requirements.txt
+    .venv/bin/python -m bot --sub 'https://sub.owelwe.live/XXXXXXXX' --limit 100GB
 
-## Запуск
-
-    .venv/bin/python -m bot --sub 'https://sub.owelwe.live/XXXXXXXX'
-
-Полный список флагов:
+Флаги CLI:
 
     --sub URL              URL подписки
     --sub-file PATH        локальный файл вместо URL (для тестов)
-    --singbox PATH         путь к бинарю sing-box (по умолчанию из PATH)
+    --singbox PATH         путь к бинарю sing-box
     --port N               локальный SOCKS/HTTP порт (10808)
     --workers N            параллельные загрузки (16)
-    --limit VALUE          лимит трафика: 100GB, 500MB, 0 = без лимита
+    --limit VALUE          100GB, 500MB, 0 = без лимита
     --interval SEC         период строк прогресса (5)
-    --files PATH           файл со списком URL для качания (по строке)
-    --ua STRING            User-Agent при запросе подписки (v2rayN/6.42)
+    --files PATH           файл со списком URL для качания
+    --ua STRING            User-Agent при запросе подписки
     --log-level LEVEL      уровень sing-box (warn)
     --dry-run              распарсить и вывести outbounds, не запуская
 
-## Что качает
+## Форматы подписки
 
-По умолчанию — большие тестовые файлы Cloudflare / OVH / Tele2 /
-LeaseWeb / Thinkbroadband / Cachefly. Полный список в
-`bot/traffic.py`. Свой список URL — через `--files`, по строке на URL.
+- base64 со списком `vmess://`, `vless://`, `trojan://`, `ss://`, `hy2://`
+- Clash / mihomo YAML (ключ `proxies:`)
+- сырой sing-box JSON с ключом `outbounds`
 
-## Примеры
-
-Скушать 100 ГБ и остановиться:
-
-    .venv/bin/python -m bot --sub 'https://sub.owelwe.live/XXX' --limit 100GB
-
-Больше потоков:
-
-    .venv/bin/python -m bot --sub 'https://...' --workers 64 --limit 200GB
-
-Свои файлы:
-
-    .venv/bin/python -m bot --sub 'https://...' --files my-urls.txt
-
-Оффлайн проверка парсинга на локальной подписке:
+Оффлайн проверка парсинга:
 
     .venv/bin/python -m bot --sub-file fixtures/sub-b64.txt --dry-run
     .venv/bin/python -m bot --sub-file fixtures/sub-clash.yaml --dry-run
 
-## Как это работает
+## Что качает
 
-1. `bot/subscription.py` — GET на URL с UA `v2rayN/6.42`, попытка
-   base64-декода, разбор в один из трёх форматов.
-2. `bot/outbound.py` — каждая нода превращается в объект
-   sing-box outbound.
-3. `bot/singbox.py` — генерирует конфиг с mixed inbound и селектором,
-   запускает `sing-box run -c config.json`, ждёт локальный порт.
-4. `bot/traffic.py` — N `asyncio`-воркеров через `aiohttp_socks`
-   стримят большие файлы через локальный SOCKS в `/dev/null`,
-   аккумулируя счётчик байт.
-5. `bot/report.py` — каждые `--interval` секунд печатает съеденный
-   объём, текущую и среднюю скорость.
+По умолчанию — большие тестовые файлы Cloudflare / OVH / Tele2 /
+LeaseWeb / Thinkbroadband / Cachefly. Свой список URL — через `--files`,
+по строке на URL.
+
+## Устройство
+
+- `bot/subscription.py` — GET, base64-декод, разбор в один из трёх форматов
+- `bot/outbound.py` — конвертация нод в объекты sing-box outbound
+- `bot/singbox.py` — генерация конфига, запуск процесса, ожидание порта
+- `bot/traffic.py` — N `asyncio`-воркеров через `aiohttp_socks` в `/dev/null`
+- `bot/report.py` — прогресс и парсинг размеров `100GB`
+- `bot/__main__.py` — CLI
+- `bot/tg.py` — Telegram-бот на long-polling
+- `install.sh` — one-shot установщик под systemd
 
 ## Замечания
 
-- Скорость упирается в скорость самой ноды подписки, поэтому имеет
-  смысл гонять с прокси, у которой есть заведомо толстый аплинк.
-- Некоторые CDN отдают файлы только с определённых регионов —
-  если счётчик замер, добавьте больше зеркал в `--files`.
-- Sing-box открывает Clash API на `127.0.0.1:9090`, при желании
-  можно из него переключать активный outbound.
+- Скорость упирается в аплинк ноды подписки.
+- Если счётчик замер — некоторые CDN отдают файлы только из определённых
+  регионов; добавь свои через `--files`.
+- Sing-box открывает Clash API на `127.0.0.1:9090` — можно из него
+  переключать активный outbound руками.
+- **Токен бота хранится только в `/etc/vpn-traffic-bot/env` (0600) и в
+  env-переменной systemd**. В репо ничего не пишется. Если токен где-то
+  засветился — сделай в `@BotFather` `/revoke` и перезапиши файл.
