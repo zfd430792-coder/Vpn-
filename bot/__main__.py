@@ -21,7 +21,7 @@ async def run(args: argparse.Namespace) -> int:
         outbounds, ua_used, raw, info = fetch_and_load(args.sub, ua=args.ua, hwid=args.hwid)
         if not outbounds and raw:
             print(
-                f"подписка отдаёт только заглушки (узлов-пустышек: {raw}). Проверь HWID.",
+                f"подписка отдаёт только заглушки (узлов-пустышек: {len(raw)}). Проверь HWID.",
                 file=sys.stderr,
             )
 

@@ -4,9 +4,7 @@ from .outbound import from_clash_proxies, from_uris
 from .subscription import fetch_full, parse
 
 
-# Панели часто отдают реальные ноды только "своему" клиенту и определяют
-# его по User-Agent. Перебираем популярные клиенты, пока не придут
-# настоящие узлы (Happ первым — многие панели требуют именно его).
+# Панели часто отдают реальные ноды только "своему" клиенту (по User-Agent).
 USER_AGENTS: List[str] = [
     "Happ/1.11.1",
     "Happ",
@@ -25,7 +23,6 @@ _DUMMY_SERVERS = {"", "0.0.0.0", "0", "127.0.0.1", "::", "::1", "localhost"}
 
 
 def happ_headers(hwid: Optional[str]) -> Dict[str, str]:
-    """Заголовки клиента Happ. Ключевой — x-hwid."""
     if not hwid:
         return {}
     return {
@@ -37,8 +34,6 @@ def happ_headers(hwid: Optional[str]) -> Dict[str, str]:
 
 
 def parse_userinfo(headers: Dict[str, str]) -> Dict[str, int]:
-    """Разбирает заголовок Subscription-Userinfo:
-    upload=..; download=..; total=..; expire=..  (байты / unix-время)."""
     raw = ""
     for k, v in headers.items():
         if k.lower() == "subscription-userinfo":
@@ -52,17 +47,14 @@ def parse_userinfo(headers: Dict[str, str]) -> Dict[str, int]:
         if "=" not in part:
             continue
         key, val = part.split("=", 1)
-        key = key.strip().lower()
-        val = val.strip()
         try:
-            info[key] = int(val)
+            info[key.strip().lower()] = int(val.strip())
         except ValueError:
             pass
     return info
 
 
 def is_dummy(ob: dict) -> bool:
-    """Заглушка вида server=0.0.0.0, port=1, нулевой uuid и т.п."""
     server = str(ob.get("server", "")).strip().lower()
     if server in _DUMMY_SERVERS:
         return True
@@ -101,11 +93,11 @@ def fetch_and_load(
     uas: Optional[List[str]] = None,
     timeout: int = 20,
     hwid: Optional[str] = None,
-) -> Tuple[List[dict], str, int, Dict[str, int]]:
-    """Перебирает User-Agent'ы (с Happ-заголовками, если есть HWID), пока
-    подписка не отдаст реальные ноды.
+) -> Tuple[List[dict], str, List[dict], Dict[str, int]]:
+    """Перебирает UA (с Happ-заголовками, если HWID), пока не придут реальные ноды.
 
-    Возвращает (outbounds, ua_used, raw_seen, userinfo).
+    Возвращает (real_outbounds, ua_used, raw_outbounds, userinfo).
+    raw_outbounds — всё что отдала подписка (включая заглушки с их тегами).
     """
     candidates: List[str] = []
     if ua:
@@ -123,25 +115,25 @@ def fetch_and_load(
 
     extra = happ_headers(hwid)
     last_err: Optional[Exception] = None
-    best_raw = 0
+    best_raw: List[dict] = []
     best_ua = ordered[0] if ordered else ""
     best_info: Dict[str, int] = {}
     for u in ordered:
         try:
             body, resp_headers = fetch_full(url, ua=u, timeout=timeout, headers=extra)
             raw = _raw_outbounds(body)
-        except Exception as e:  # noqa: BLE001 - пробуем следующий UA
+        except Exception as e:  # noqa: BLE001
             last_err = e
             continue
         info = parse_userinfo(resp_headers)
         real = [o for o in raw if not is_dummy(o)]
-        if len(raw) > best_raw:
-            best_raw = len(raw)
+        if len(raw) > len(best_raw):
+            best_raw = raw
             best_ua = u
             best_info = info
         if real:
-            return real, u, len(raw), info
+            return real, u, raw, info
 
-    if best_raw == 0 and last_err is not None:
+    if not best_raw and last_err is not None:
         raise last_err
     return [], best_ua, best_raw, best_info

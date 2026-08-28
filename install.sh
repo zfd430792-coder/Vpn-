@@ -13,6 +13,7 @@ REPO_URL="${REPO_URL:-https://github.com/zfd430792-coder/Vpn-.git}"
 REPO_BRANCH="${REPO_BRANCH:-claude/traffic-consuming-bot-iuxyrf}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/vpn-traffic-bot}"
 ENV_DIR="${ENV_DIR:-/etc/vpn-traffic-bot}"
+DATA_DIR="${DATA_DIR:-/var/lib/vpn-traffic-bot}"
 SERVICE_NAME="${SERVICE_NAME:-vpn-traffic-bot}"
 WORKERS="${WORKERS:-64}"
 DEFAULT_LIMIT="${DEFAULT_LIMIT:-0}"
@@ -111,6 +112,7 @@ DEFAULT_LIMIT=$DEFAULT_LIMIT
 SOCKS_PORT=$SOCKS_PORT
 SUB_HWID=$SUB_HWID
 SUB_UA=$SUB_UA
+DATA_DIR=$DATA_DIR
 SINGBOX_BIN=/usr/local/bin/sing-box
 ENV
   chmod 0600 "$ENV_DIR/env"
@@ -129,6 +131,7 @@ Type=simple
 EnvironmentFile=$ENV_DIR/env
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/.venv/bin/python -m bot.tg
+StateDirectory=vpn-traffic-bot
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
