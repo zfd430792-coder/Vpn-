@@ -227,7 +227,7 @@ class Bot:
         rows = []
         if self.store.keys:
             rows.append([_btn("▶️ Запустить всё", "run_all")])
-        for i, k in enumerate(self.store.keys):
+        for i in range(len(self.store.keys)):
             rows.append([
                 _btn(f"▶️ {i + 1}", f"run:{i}"),
                 _btn(f"🔍 {i + 1}", f"check:{i}"),
@@ -280,6 +280,9 @@ class Bot:
     def _running_kb(self) -> dict:
         return _kb([[_btn("⏹ Стоп", "stop"), _btn("🔄 Обновить", "status")]])
 
+    def _status_kb(self) -> dict:
+        return _kb([[_btn("🔄 Обновить", "status"), _btn("⬅️ меню", "menu")]])
+
     # ---------- reports ----------
     def _save_report(self, key: dict, status: str, info: Dict[str, int], eaten: int, note: str) -> None:
         total, used, remaining = plan_summary(info)
@@ -303,11 +306,21 @@ class Bot:
         return "панель отдаёт только заглушки"
 
     # ---------- burn ----------
-    async def _burn_one(self, chat_id: int, key: dict, limit_override: int) -> None:
+    async def _burn_one(self, chat_id: int, key: dict, limit_override: int, mid: Optional[int]) -> None:
         name = key.get("name", "key")
         url = key["url"]
         hwid = key.get("hwid") or self.cfg["hwid"]
-        await self.tg.send(chat_id, f"[{name}] качаю подписку…")
+
+        async def put(text: str, kb: Optional[dict]) -> None:
+            nonlocal mid
+            if mid:
+                await self.tg.edit(chat_id, mid, text, kb)
+            else:
+                r = await self.tg.send(chat_id, text, kb)
+                if isinstance(r, dict):
+                    mid = (r.get("result") or {}).get("message_id")
+
+        await put(f"[{name}] качаю подписку…", None)
         loop = asyncio.get_event_loop()
         try:
             outbounds, ua_used, raw, info = await loop.run_in_executor(
@@ -315,7 +328,7 @@ class Bot:
             )
         except Exception as e:
             self._save_report(key, "ошибка", {}, 0, str(e))
-            await self.tg.send(chat_id, f"[{name}] ошибка загрузки: {e}", self._menu_kb())
+            await put(f"[{name}] ошибка загрузки: {e}", self._menu_kb())
             return
         total, used, remaining = plan_summary(info)
         if not outbounds:
@@ -324,7 +337,7 @@ class Bot:
             txt = f"⛔ [{name}] реальных нод нет — {reason}"
             if info:
                 txt += f"\nплан: {fmt_bytes(used)} / {fmt_bytes(total)}, осталось {fmt_bytes(remaining)}"
-            await self.tg.send(chat_id, txt, self._menu_kb())
+            await put(txt, self._menu_kb())
             return
 
         limit = limit_override
@@ -339,7 +352,7 @@ class Bot:
         except Exception as e:
             await self.session.stop()
             self._save_report(key, "ошибка старта", info, 0, str(e))
-            await self.tg.send(chat_id, f"[{name}] ошибка старта: {e}", self._menu_kb())
+            await put(f"[{name}] ошибка старта: {e}", self._menu_kb())
             return
 
         head = f"[{name}] нод:{n} · воркеров:{self.session.workers}"
@@ -347,15 +360,15 @@ class Bot:
             head += f" · дожру {fmt_bytes(limit)}"
         elif limit:
             head += f" · лимит {fmt_bytes(limit)}"
-        sent = await self.tg.send(chat_id, head + "\n\n" + self.session.status(), self._running_kb())
-        mid = (sent.get("result") or {}).get("message_id") if isinstance(sent, dict) else None
+        await put(head + "\n\n" + self.session.status(), self._running_kb())
+        the_mid = mid
 
         async def _live() -> None:
             try:
                 while self.session.running():
                     await asyncio.sleep(20)
-                    if mid:
-                        await self.tg.edit(chat_id, mid, head + "\n\n" + self.session.status(), self._running_kb())
+                    if the_mid:
+                        await self.tg.edit(chat_id, the_mid, head + "\n\n" + self.session.status(), self._running_kb())
             except asyncio.CancelledError:
                 pass
 
@@ -378,14 +391,14 @@ class Bot:
             tail = f"\n\n✅ [{name}] съел {fmt_bytes(eaten)} — лимит/остаток достигнут."
         else:
             tail = f"\n\n⏹ [{name}] остановлен, съел {fmt_bytes(eaten)}."
-        if mid:
-            await self.tg.edit(chat_id, mid, head + "\n\n" + final + tail, self._menu_kb())
-        else:
-            await self.tg.send(chat_id, final + tail, self._menu_kb())
+        await put(head + "\n\n" + final + tail, self._menu_kb())
 
-    async def _run_indices(self, chat_id: int, indices: List[int], limit_override: int) -> None:
+    async def _run_indices(self, chat_id: int, indices: List[int], limit_override: int, mid: Optional[int]) -> None:
         if self.busy:
-            await self.tg.send(chat_id, "уже работаю. Стоп сначала.", self._running_kb())
+            if mid:
+                await self.tg.edit(chat_id, mid, "уже работаю. Стоп сначала.", self._running_kb())
+            else:
+                await self.tg.send(chat_id, "уже работаю.", self._running_kb())
             return
         self.busy = True
         self._stop_all = False
@@ -397,63 +410,76 @@ class Bot:
                 key = self.store.get(i)
                 if not key:
                     continue
-                await self._burn_one(chat_id, key, limit_override)
+                await self._burn_one(chat_id, key, limit_override, mid)
                 done += 1
-            if len(indices) > 1:
-                await self.tg.send(chat_id, f"🏁 готово: обработано ключей {done}.", self._menu_kb())
+            if len(indices) > 1 and mid:
+                await self.tg.edit(chat_id, mid, f"🏁 готово: обработано ключей {done}.\n\n" + self._menu_text(), self._menu_kb())
         finally:
             self.busy = False
 
-    async def _check(self, chat_id: int, idxs: List[int]) -> None:
-        loop = asyncio.get_event_loop()
-        for i in idxs:
-            key = self.store.get(i)
-            if not key:
-                continue
-            name = key.get("name", "key")
-            hwid = key.get("hwid") or self.cfg["hwid"]
-            try:
-                outbounds, ua_used, raw, info = await loop.run_in_executor(
-                    None, lambda: fetch_and_load(key["url"], ua=self.cfg["ua"], hwid=hwid or None)
-                )
-            except Exception as e:
-                await self.tg.send(chat_id, f"[{name}] ошибка: {e}")
-                continue
-            total, used, remaining = plan_summary(info)
-            prev = key.get("report", {}).get("eaten", 0)
-            if outbounds:
-                self._save_report(key, "жив", info, prev, "")
-                msg = f"✅ [{name}] жив, нод: {len(outbounds)}"
-            else:
-                reason = self._deadreason(info, raw)
-                self._save_report(key, "мёртв/исчерпан", info, prev, reason)
-                msg = f"⛔ [{name}] {reason}"
-            if info:
-                msg += f"\nплан: {fmt_bytes(used)} / {fmt_bytes(total)}, осталось {fmt_bytes(remaining)}"
-            await self.tg.send(chat_id, msg)
+    async def _check(self, chat_id: int, idx: int, mid: Optional[int]) -> None:
+        kbdone = _kb([[_btn("⬅️ ключи", "keys"), _btn("⬅️ меню", "menu")]])
 
-    async def _run_arg(self, chat_id: int, arg: str) -> None:
+        async def out(text: str, kb: Optional[dict]) -> None:
+            if mid:
+                await self.tg.edit(chat_id, mid, text, kb)
+            else:
+                await self.tg.send(chat_id, text, kb)
+
+        key = self.store.get(idx)
+        if not key:
+            await out("нет такого ключа.", kbdone)
+            return
+        name = key.get("name", "key")
+        hwid = key.get("hwid") or self.cfg["hwid"]
+        await out(f"🔍 [{name}] проверяю…", None)
+        loop = asyncio.get_event_loop()
+        try:
+            outbounds, ua_used, raw, info = await loop.run_in_executor(
+                None, lambda: fetch_and_load(key["url"], ua=self.cfg["ua"], hwid=hwid or None)
+            )
+        except Exception as e:
+            await out(f"[{name}] ошибка: {e}", kbdone)
+            return
+        total, used, remaining = plan_summary(info)
+        prev = key.get("report", {}).get("eaten", 0)
+        if outbounds:
+            self._save_report(key, "жив", info, prev, "")
+            msg = f"✅ [{name}] жив, нод: {len(outbounds)}"
+        else:
+            reason = self._deadreason(info, raw)
+            self._save_report(key, "мёртв/исчерпан", info, prev, reason)
+            msg = f"⛔ [{name}] {reason}"
+        if info:
+            msg += f"\nплан: {fmt_bytes(used)} / {fmt_bytes(total)}, осталось {fmt_bytes(remaining)}"
+        await out(msg, kbdone)
+
+    async def _run_arg(self, chat_id: int, arg: str, mid: Optional[int]) -> None:
         keys = self.store.keys
         if not keys:
-            await self.tg.send(chat_id, "ключей нет.", self._keys_kb())
+            if mid:
+                await self.tg.edit(chat_id, mid, self._keys_text(), self._keys_kb())
             return
         arg = arg.strip().lower()
         if arg in ("all", "все", "*", ""):
             if arg == "" and len(keys) > 1:
-                await self.tg.send(chat_id, "выбери ключ кнопкой:", self._keys_kb())
+                if mid:
+                    await self.tg.edit(chat_id, mid, self._keys_text(), self._keys_kb())
                 return
             indices = list(range(len(keys)))
         else:
             try:
                 idx = int(arg) - 1
             except ValueError:
-                await self.tg.send(chat_id, "выбери ключ кнопкой:", self._keys_kb())
+                if mid:
+                    await self.tg.edit(chat_id, mid, self._keys_text(), self._keys_kb())
                 return
             if not (0 <= idx < len(keys)):
-                await self.tg.send(chat_id, "нет такого ключа.", self._keys_kb())
+                if mid:
+                    await self.tg.edit(chat_id, mid, self._keys_text(), self._keys_kb())
                 return
             indices = [idx]
-        await self._run_indices(chat_id, indices, self._take_limit())
+        await self._run_indices(chat_id, indices, self._take_limit(), mid)
 
     # ---------- callbacks ----------
     async def on_callback(self, chat_id: int, mid: Optional[int], data: str, cb_id: str) -> None:
@@ -471,27 +497,29 @@ class Bot:
             if mid:
                 await self.tg.edit(chat_id, mid, self._settings_text(), self._settings_kb())
         elif data == "status":
-            await self.tg.send(chat_id, self.session.status(),
-                               self._running_kb() if self.session.running() else self._menu_kb())
+            kb = self._running_kb() if self.session.running() else self._status_kb()
+            if mid:
+                await self.tg.edit(chat_id, mid, self.session.status(), kb)
         elif data == "run_all":
-            asyncio.create_task(self._run_arg(chat_id, "all"))
+            asyncio.create_task(self._run_arg(chat_id, "all", mid))
         elif data == "stop":
             self._stop_all = True
             if self.session.running():
                 await self.session.stop()
-                await self.tg.send(chat_id, "⏹ остановил.", self._menu_kb())
-            else:
-                await self.tg.send(chat_id, "💤 и так простаиваю.", self._menu_kb())
+            elif mid:
+                await self.tg.edit(chat_id, mid, self._menu_text(), self._menu_kb())
         elif data == "addkey":
             self.awaiting[chat_id] = "key"
-            await self.tg.send(chat_id, "🔑 пришли ссылку на подписку одним сообщением (можно через пробел hwid).", _kb(BACK))
+            if mid:
+                await self.tg.edit(chat_id, mid, "🔑 пришли ссылку на подписку одним сообщением (можно через пробел hwid).", _kb(BACK))
         elif data == "addtarget":
             self.awaiting[chat_id] = "target"
-            await self.tg.send(chat_id, "🖥 пришли URL большого файла (чем жирнее и ближе — тем лучше).", _kb(BACK))
+            if mid:
+                await self.tg.edit(chat_id, mid, "🖥 пришли URL большого файла (чем жирнее и ближе — тем лучше).", _kb(BACK))
         elif data.startswith("run:"):
-            asyncio.create_task(self._run_indices(chat_id, [int(data[4:])], self._take_limit()))
+            asyncio.create_task(self._run_indices(chat_id, [int(data[4:])], self._take_limit(), mid))
         elif data.startswith("check:"):
-            asyncio.create_task(self._check(chat_id, [int(data[6:])]))
+            asyncio.create_task(self._check(chat_id, int(data[6:]), mid))
         elif data.startswith("del:"):
             self.store.remove(int(data[4:]))
             if mid:
@@ -546,13 +574,7 @@ class Bot:
                 self._stop_all = True
                 if self.session.running():
                     await self.session.stop()
-                    await self.tg.send(chat_id, "⏹ остановил.", self._menu_kb())
-                else:
-                    await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
-                return
-            if cmd == "/status":
-                await self.tg.send(chat_id, self.session.status(),
-                                   self._running_kb() if self.session.running() else self._menu_kb())
+                await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
                 return
             await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
             return
@@ -561,8 +583,9 @@ class Bot:
         if url:
             k = self.store.add(url, hwid="", name=default_name(url))
             idx = self.store.index_of(url)
-            await self.tg.send(chat_id, f"✅ ключ {k['name']} добавлен. запускаю…")
-            asyncio.create_task(self._run_indices(chat_id, [idx], self._take_limit()))
+            sent = await self.tg.send(chat_id, f"✅ ключ {k['name']} добавлен. запускаю…")
+            mid = (sent.get("result") or {}).get("message_id") if isinstance(sent, dict) else None
+            asyncio.create_task(self._run_indices(chat_id, [idx], self._take_limit(), mid))
             return
         await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
 
