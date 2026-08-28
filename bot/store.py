@@ -104,10 +104,20 @@ class KeyStore:
             return t
         return None
 
-    # ---- manual exit servers ----
-    def add_server(self, ob: Dict) -> None:
-        self.servers.append(ob)
+    # ---- agent servers (extra burner machines) ----
+    def add_server(self, url: str, token: str = "", name: str = "") -> Dict:
+        url = url.rstrip("/")
+        for s in self.servers:
+            if s.get("url") == url:
+                s["token"] = token
+                if name:
+                    s["name"] = name
+                self.save()
+                return s
+        srv = {"url": url, "token": token, "name": name or (urlparse(url).hostname or url)}
+        self.servers.append(srv)
         self.save()
+        return srv
 
     def remove_server(self, idx: int) -> Optional[Dict]:
         if 0 <= idx < len(self.servers):

@@ -1,47 +1,52 @@
 #!/usr/bin/env bash
-# One-shot installer for vpn-traffic-bot.
+# Installer for vpn-traffic-bot. Two roles:
+#   ROLE=bot   (default) — Telegram пульт
+#   ROLE=agent           — доп. VPS, который жрёт параллельно
 #
-# Usage (as root):
-#   TELEGRAM_BOT_TOKEN='123:AA...' SUB_HWID='xxxx' bash install.sh
-# or one-liner:
-#   curl -fsSL https://raw.githubusercontent.com/zfd430792-coder/Vpn-/claude/traffic-consuming-bot-iuxyrf/install.sh \
-#     | sudo TELEGRAM_BOT_TOKEN='123:AA...' SUB_HWID='xxxx' bash
+# Главный (телега):
+#   curl -fsSL .../install.sh | sudo TELEGRAM_BOT_TOKEN='123:AA' SUB_HWID='xxx' bash
+# Агент на другом VPS:
+#   curl -fsSL .../install.sh | sudo ROLE=agent bash    # токен сгенерится и выведется
 
 set -euo pipefail
 
+ROLE="${ROLE:-bot}"
 REPO_URL="${REPO_URL:-https://github.com/zfd430792-coder/Vpn-.git}"
 REPO_BRANCH="${REPO_BRANCH:-claude/traffic-consuming-bot-iuxyrf}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/vpn-traffic-bot}"
 ENV_DIR="${ENV_DIR:-/etc/vpn-traffic-bot}"
 DATA_DIR="${DATA_DIR:-/var/lib/vpn-traffic-bot}"
-SERVICE_NAME="${SERVICE_NAME:-vpn-traffic-bot}"
 WORKERS="${WORKERS:-64}"
 DEFAULT_LIMIT="${DEFAULT_LIMIT:-0}"
 SOCKS_PORT="${SOCKS_PORT:-10808}"
 SUB_HWID="${SUB_HWID:-}"
 SUB_UA="${SUB_UA:-Happ/1.11.1}"
+AGENT_PORT="${AGENT_PORT:-8787}"
 SB_FALLBACK_VER="${SB_FALLBACK_VER:-1.11.15}"
+
+if [[ "$ROLE" == "agent" ]]; then
+  SERVICE_NAME="${SERVICE_NAME:-vpn-traffic-agent}"
+  AGENT_TOKEN="${AGENT_TOKEN:-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
+else
+  SERVICE_NAME="${SERVICE_NAME:-vpn-traffic-bot}"
+fi
 
 msg() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; }
 
 if [[ "$(id -u)" -ne 0 ]]; then
-  err "нужно запускать под root (sudo)."
-  exit 1
+  err "нужно под root (sudo)."; exit 1
 fi
-
-if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-  err "TELEGRAM_BOT_TOKEN не задан. Пример: TELEGRAM_BOT_TOKEN='123:AA...' SUB_HWID='xxxx' bash install.sh"
-  exit 1
+if [[ "$ROLE" == "bot" && -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+  err "TELEGRAM_BOT_TOKEN не задан (для ROLE=bot)."; exit 1
 fi
 
 install_deps() {
-  msg "ставлю базовые пакеты"
+  msg "ставлю пакеты"
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y --no-install-recommends \
-      python3 python3-venv python3-pip git curl ca-certificates tar
+    apt-get install -y --no-install-recommends python3 python3-venv python3-pip git curl ca-certificates tar
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y python3 python3-pip git curl ca-certificates tar
   elif command -v yum >/dev/null 2>&1; then
@@ -49,39 +54,31 @@ install_deps() {
   elif command -v apk >/dev/null 2>&1; then
     apk add --no-cache python3 py3-pip git curl ca-certificates tar bash
   else
-    err "неизвестный менеджер пакетов. поставь python3, git, curl вручную и запусти заново."
-    exit 1
+    err "неизвестный пакетный менеджер"; exit 1
   fi
 }
 
 install_singbox() {
   if command -v sing-box >/dev/null 2>&1; then
-    msg "sing-box уже стоит: $(sing-box version 2>/dev/null | head -1 || echo unknown)"
-    return
+    msg "sing-box уже есть"; return
   fi
   msg "ставлю sing-box"
   local arch
   case "$(uname -m)" in
-    x86_64|amd64)   arch=amd64 ;;
-    aarch64|arm64)  arch=arm64 ;;
-    armv7l)         arch=armv7 ;;
-    *) err "неподдерживаемая архитектура $(uname -m)"; exit 1 ;;
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    armv7l) arch=armv7 ;;
+    *) err "архитектура $(uname -m) не поддерживается"; exit 1 ;;
   esac
   local ver
-  ver="$(curl -fsSL 'https://api.github.com/repos/SagerNet/sing-box/releases/latest' \
-        | sed -n 's/.*\"tag_name\":[[:space:]]*\"v\([^\"]*\)\".*/\1/p' | head -1 || true)"
-  if [[ -z "$ver" ]]; then
-    ver="$SB_FALLBACK_VER"
-    msg "GitHub API недоступен, беру ${ver}"
-  fi
+  ver="$(curl -fsSL 'https://api.github.com/repos/SagerNet/sing-box/releases/latest' | sed -n 's/.*\"tag_name\":[[:space:]]*\"v\([^\"]*\)\".*/\1/p' | head -1 || true)"
+  [[ -z "$ver" ]] && ver="$SB_FALLBACK_VER"
   local url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${arch}.tar.gz"
-  local tmp
-  tmp="$(mktemp -d)"
+  local tmp; tmp="$(mktemp -d)"
   curl -fsSL "$url" -o "$tmp/sb.tar.gz"
   tar -xzf "$tmp/sb.tar.gz" -C "$tmp"
   install -m 0755 "$tmp/sing-box-${ver}-linux-${arch}/sing-box" /usr/local/bin/sing-box
   rm -rf "$tmp"
-  msg "sing-box установлен: $(sing-box version | head -1)"
 }
 
 fetch_repo() {
@@ -95,34 +92,41 @@ fetch_repo() {
 }
 
 setup_venv() {
-  msg "делаю venv и ставлю зависимости"
+  msg "venv + зависимости"
   python3 -m venv "$INSTALL_DIR/.venv"
   "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip
   "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
 }
 
 write_env() {
-  msg "пишу $ENV_DIR/env (root:600)"
+  msg "пишу $ENV_DIR/env"
   install -d -m 0700 "$ENV_DIR"
   umask 077
-  cat > "$ENV_DIR/env" <<ENV
-TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
-WORKERS=$WORKERS
-DEFAULT_LIMIT=$DEFAULT_LIMIT
-SOCKS_PORT=$SOCKS_PORT
-SUB_HWID=$SUB_HWID
-SUB_UA=$SUB_UA
-DATA_DIR=$DATA_DIR
-SINGBOX_BIN=/usr/local/bin/sing-box
-ENV
+  {
+    echo "WORKERS=$WORKERS"
+    echo "DEFAULT_LIMIT=$DEFAULT_LIMIT"
+    echo "SOCKS_PORT=$SOCKS_PORT"
+    echo "SUB_HWID=$SUB_HWID"
+    echo "SUB_UA=$SUB_UA"
+    echo "DATA_DIR=$DATA_DIR"
+    echo "SINGBOX_BIN=/usr/local/bin/sing-box"
+    if [[ "$ROLE" == "agent" ]]; then
+      echo "AGENT_TOKEN=$AGENT_TOKEN"
+      echo "AGENT_PORT=$AGENT_PORT"
+    else
+      echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN"
+    fi
+  } > "$ENV_DIR/env"
   chmod 0600 "$ENV_DIR/env"
 }
 
 write_service() {
-  msg "пишу systemd unit"
+  msg "пишу systemd unit ($SERVICE_NAME)"
+  local execmod="bot.tg"
+  [[ "$ROLE" == "agent" ]] && execmod="bot.agent"
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<UNIT
 [Unit]
-Description=VPN traffic-burning Telegram bot
+Description=VPN traffic burner ($ROLE)
 After=network-online.target
 Wants=network-online.target
 
@@ -130,7 +134,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=$ENV_DIR/env
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/.venv/bin/python -m bot.tg
+ExecStart=$INSTALL_DIR/.venv/bin/python -m $execmod
 StateDirectory=vpn-traffic-bot
 Restart=always
 RestartSec=5
@@ -155,11 +159,15 @@ write_service
 
 sleep 2
 if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
-  msg "бот запущен."
-  msg "лог:    journalctl -u ${SERVICE_NAME} -f"
-  msg "статус: systemctl status ${SERVICE_NAME}"
-  msg "стоп:   systemctl stop ${SERVICE_NAME}"
+  msg "сервис запущен: $SERVICE_NAME"
+  if [[ "$ROLE" == "agent" ]]; then
+    IP="$(curl -fsSL --max-time 5 ifconfig.me 2>/dev/null || echo '<IP-этого-VPS>')"
+    msg "АГЕНТ ГОТОВ. Добавь в бота (🖥 Серверы → ➕ добавить сервер):"
+    printf '\033[1;32m    http://%s:%s  %s\033[0m\n' "$IP" "$AGENT_PORT" "$AGENT_TOKEN"
+    msg "Открой порт $AGENT_PORT/tcp в firewall, если закрыт."
+  else
+    msg "лог: journalctl -u ${SERVICE_NAME} -f"
+  fi
 else
-  err "сервис не поднялся, смотри: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
-  exit 1
+  err "сервис не поднялся: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"; exit 1
 fi

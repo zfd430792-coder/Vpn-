@@ -2,15 +2,15 @@ import asyncio
 import os
 import time
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import aiohttp
 
-from .loader import fetch_and_load, parse_manual
-from .outbound import dedupe_tags
+from .engine import BurnSession
+from .loader import fetch_and_load
 from .report import fmt_bytes, plan_summary, units_to_bytes
-from .singbox import SingBox, build_config
 from .store import KeyStore, default_name
-from .traffic import BIG_FILES, Counter, burn
+from .traffic import BIG_FILES
 
 
 API = "https://api.telegram.org"
@@ -49,93 +49,6 @@ def _kb(rows: List[List[dict]]) -> dict:
 
 
 BACK = [[_btn("⬅️ меню", "menu")]]
-
-
-class BurnSession:
-    def __init__(self, workers: int, singbox_bin: str, port: int):
-        self.workers = workers
-        self.singbox_bin = singbox_bin
-        self.port = port
-        self.box: Optional[SingBox] = None
-        self.counter: Optional[Counter] = None
-        self.stop_event: Optional[asyncio.Event] = None
-        self.burn_task: Optional[asyncio.Task] = None
-        self.started_at: float = 0.0
-        self.limit_bytes: int = 0
-        self.node_count: int = 0
-        self.plan_total: int = 0
-        self.plan_used: int = 0
-        self.auto_limit: bool = False
-        self.title: str = ""
-
-    def running(self) -> bool:
-        return self.burn_task is not None and not self.burn_task.done()
-
-    async def start(self, outbounds: List[dict], limit_bytes: int, files: List[str], title: str = "",
-                    plan_total: int = 0, plan_used: int = 0, auto_limit: bool = False) -> int:
-        if self.running():
-            raise RuntimeError("уже запущена — сначала Стоп")
-        if not outbounds:
-            raise RuntimeError("нет выходов")
-        config = build_config(outbounds, socks_port=self.port)
-        self.box = SingBox(binary=self.singbox_bin)
-        self.box.start(config, socks_port=self.port)
-        self.counter = Counter()
-        self.stop_event = asyncio.Event()
-        self.limit_bytes = limit_bytes
-        self.plan_total = plan_total
-        self.plan_used = plan_used
-        self.auto_limit = auto_limit
-        self.title = title
-        self.started_at = time.monotonic()
-        self.node_count = len(outbounds)
-        self.burn_task = asyncio.create_task(
-            burn("127.0.0.1", self.port, self.node_count, self.workers,
-                 limit_bytes, files, self.counter, self.stop_event)
-        )
-        return len(outbounds)
-
-    def status(self) -> str:
-        if not self.counter:
-            return "💤 простаиваю."
-        elapsed = max(time.monotonic() - self.started_at, 1e-6)
-        eaten = self.counter.bytes
-        rate = eaten / elapsed
-        state = "🔥 жру трафик" if self.running() else "⏹ остановлен"
-        head = state + (f" — {self.title}" if self.title else "")
-        lines = [head, f"🖧 выходов: {self.node_count}"]
-        if self.plan_total:
-            used_now = self.plan_used + eaten
-            left = max(self.plan_total - used_now, 0)
-            lines += [
-                "——————————",
-                f"📦 план: {fmt_bytes(used_now)} / {fmt_bytes(self.plan_total)}",
-                f"🔋 осталось: {fmt_bytes(left)}",
-            ]
-        lines.append("——————————")
-        lines.append(f"🍝 съел: {fmt_bytes(eaten)}")
-        if self.limit_bytes and not self.auto_limit:
-            lines.append(f"🎯 до стопа: {fmt_bytes(max(self.limit_bytes - eaten, 0))}")
-        lines.append(f"⚡ {fmt_bytes(rate)}/s")
-        lines.append(f"⏱ {int(elapsed)}с")
-        if eaten == 0 and self.counter.errors:
-            lines.append(f"⚠ ошибок: {self.counter.errors} ({self.counter.last_error[:70]})")
-        return "\n".join(lines)
-
-    async def stop(self) -> None:
-        if self.stop_event:
-            self.stop_event.set()
-        task = self.burn_task
-        self.burn_task = None
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except BaseException:
-                pass
-        if self.box:
-            self.box.stop()
-            self.box = None
 
 
 class TgClient:
@@ -190,14 +103,29 @@ class Bot:
         self.pending_limit = self.cfg["default_limit"]
         return lim
 
+    async def _agent_call(self, agent: dict, method: str, path: str, payload: Optional[dict] = None):
+        base = (agent.get("url") or "").rstrip("/")
+        if not base:
+            return None
+        headers = {"X-Token": agent.get("token", "")}
+        try:
+            if method == "GET":
+                async with self.tg.session.get(base + path, headers=headers,
+                                               timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    return await r.json()
+            async with self.tg.session.post(base + path, headers=headers, json=payload or {},
+                                            timeout=aiohttp.ClientTimeout(total=15)) as r:
+                return await r.json()
+        except Exception:
+            return None
+
     # ---------- views ----------
     def _menu_text(self) -> str:
         st = "🔥 работаю" if self.session.running() else "💤 простаиваю"
         return (
             "🚀 VPN Traffic Bot\n"
             f"состояние: {st}\n"
-            f"ключей: {len(self.store.keys)} · серверов: {len(self.store.servers)} · "
-            f"источников: {len(BIG_FILES) + len(self.store.targets)} · воркеров: {self._workers()}"
+            f"ключей: {len(self.store.keys)} · серверов: {len(self.store.servers)} · воркеров: {self._workers()}"
         )
 
     def _menu_kb(self) -> dict:
@@ -242,32 +170,24 @@ class Bot:
 
     def _servers_text(self) -> str:
         if not self.store.servers:
-            return ("🖥 Своих серверов нет.\n"
-                    "Добавь свой прокси/VPN (SOCKS5, HTTP, SS, VLESS…) — бот будет жрать и через них.")
-        out = ["🖥 Мои серверы (выходы):"]
+            return ("🖥 Доп. серверов нет.\n"
+                    "Это другие VPS с агентом — они жрут тот же ключ параллельно (быстрее).\n"
+                    "Установи агента на VPS и добавь его сюда (URL + токен).")
+        out = ["🖥 Доп. серверы (жрут параллельно):"]
         for i, s in enumerate(self.store.servers, 1):
-            out.append(f"{i}. {s.get('type')} · {s.get('server')}:{s.get('server_port')}")
+            out.append(f"{i}. {s.get('name')} — {s.get('url')}")
         return "\n".join(out)
 
     def _servers_kb(self) -> dict:
         rows = []
-        if self.store.servers:
-            rows.append([_btn("▶️ Жрать через серверы", "srv_run")])
         for i in range(len(self.store.servers)):
-            rows.append([_btn(f"🗑 удалить {i + 1}", f"sdel:{i}")])
+            rows.append([_btn(f"🔌 пинг {i + 1}", f"sping:{i}"), _btn(f"🗑 {i + 1}", f"sdel:{i}")])
         rows.append([_btn("➕ добавить сервер", "srvadd")])
         rows.append([_btn("⬅️ меню", "menu")])
         return _kb(rows)
 
-    def _srvadd_kb(self) -> dict:
-        return _kb([
-            [_btn("SOCKS5", "srvt:socks"), _btn("HTTP", "srvt:http")],
-            [_btn("SS / VLESS / URI", "srvt:uri")],
-            [_btn("⬅️ назад", "servers")],
-        ])
-
     def _targets_text(self) -> str:
-        out = ["🎯 Источники (откуда качать; чем больше — тем больше трафика)",
+        out = ["🎯 Источники (откуда качать)",
                f"встроенных: {len(BIG_FILES)} (Cloudflare/Hetzner/OVH/Tele2…)"]
         if self.store.targets:
             out.append("твои:")
@@ -290,20 +210,15 @@ class Bot:
         lim_s = fmt_bytes(lim) if lim else "Авто (остаток плана)"
         return (
             "⚙️ Настройки\n"
-            f"воркеров (параллельных загрузок): {self._workers()}\n"
-            "больше = больше трафика (до потолка канала VPS)\n"
+            f"воркеров: {self._workers()} (больше = больше трафика)\n"
             f"лимит следующего запуска: {lim_s}"
         )
 
     def _settings_kb(self) -> dict:
         cur = self._workers()
         wrow = [_btn(("✅ " if n == cur else "") + str(n), f"wrk:{n}") for n in WORKER_PRESETS]
-        lrow = [
-            _btn("Лимит: Авто", "lim:auto"),
-            _btn("100GB", "lim:100g"),
-            _btn("500GB", "lim:500g"),
-            _btn("1TB", "lim:1t"),
-        ]
+        lrow = [_btn("Лимит: Авто", "lim:auto"), _btn("100GB", "lim:100g"),
+                _btn("500GB", "lim:500g"), _btn("1TB", "lim:1t")]
         return _kb([wrow, lrow, [_btn("⬅️ меню", "menu")]])
 
     def _running_kb(self) -> dict:
@@ -332,11 +247,10 @@ class Bot:
                 return f"панель пишет: «{tag[:80]}»"
         return "панель отдаёт только заглушки"
 
-    # ---------- burn (key or servers) ----------
-    async def _burn(self, chat_id: int, source: Tuple[str, Optional[dict]], limit_override: int, mid: Optional[int]) -> None:
-        kind, key = source
-        title = key.get("name", "key") if key else "мои серверы"
-        manual = list(self.store.servers)
+    # ---------- burn with fleet ----------
+    async def _burn(self, chat_id: int, key: dict, limit_override: int, mid: Optional[int]) -> None:
+        title = key.get("name", "key")
+        hwid = key.get("hwid") or self.cfg["hwid"]
 
         async def put(text: str, kb: Optional[dict]) -> None:
             nonlocal mid
@@ -347,69 +261,95 @@ class Bot:
                 if isinstance(r, dict):
                     mid = (r.get("result") or {}).get("message_id")
 
-        info: Dict[str, int] = {}
-        total = used = remaining = 0
-        if kind == "key":
-            await put(f"[{title}] качаю подписку…", None)
-            loop = asyncio.get_event_loop()
-            try:
-                sub_ob, ua_used, raw, info = await loop.run_in_executor(
-                    None, lambda: fetch_and_load(key["url"], ua=self.cfg["ua"],
-                                                 hwid=(key.get("hwid") or self.cfg["hwid"]) or None)
-                )
-            except Exception as e:
-                self._save_report(key, "ошибка", {}, 0, str(e))
-                await put(f"[{title}] ошибка загрузки: {e}", self._menu_kb())
-                return
-            total, used, remaining = plan_summary(info)
-            if not sub_ob:
-                reason = self._deadreason(info, raw)
-                self._save_report(key, "мёртв/исчерпан", info, 0, reason)
-                txt = f"⛔ [{title}] реальных нод нет — {reason}"
-                if info:
-                    txt += f"\nплан: {fmt_bytes(used)} / {fmt_bytes(total)}, осталось {fmt_bytes(remaining)}"
-                if manual:
-                    txt += f"\n(можешь жрать через свои серверы: 🖥 Серверы → Жрать через серверы)"
-                await put(txt, self._menu_kb())
-                return
-            outbounds = dedupe_tags(list(sub_ob) + manual)
-        else:
-            outbounds = dedupe_tags(list(manual))
-            if not outbounds:
-                await put("🖥 нет добавленных серверов. добавь в разделе Серверы.", self._menu_kb())
-                return
+        await put(f"[{title}] качаю подписку…", None)
+        loop = asyncio.get_event_loop()
+        try:
+            sub_ob, ua_used, raw, info = await loop.run_in_executor(
+                None, lambda: fetch_and_load(key["url"], ua=self.cfg["ua"], hwid=hwid or None)
+            )
+        except Exception as e:
+            self._save_report(key, "ошибка", {}, 0, str(e))
+            await put(f"[{title}] ошибка загрузки: {e}", self._menu_kb())
+            return
+        total, used, remaining = plan_summary(info)
+        if not sub_ob:
+            reason = self._deadreason(info, raw)
+            self._save_report(key, "мёртв/исчерпан", info, 0, reason)
+            txt = f"⛔ [{title}] реальных нод нет — {reason}"
+            if info:
+                txt += f"\nплан: {fmt_bytes(used)} / {fmt_bytes(total)}, осталось {fmt_bytes(remaining)}"
+            await put(txt, self._menu_kb())
+            return
 
-        limit = limit_override
-        auto = False
-        if limit <= 0 and remaining > 0:
-            limit = remaining
+        if limit_override > 0:
+            target = limit_override
+            auto = False
+        elif remaining > 0:
+            target = remaining
             auto = True
+        else:
+            target = 0
+            auto = False
+
+        agents = list(self.store.servers)
+        local_limit = 0 if agents else target
         self.session.workers = self._workers()
         try:
-            n = await self.session.start(outbounds, limit, self._files(), title=title,
-                                         plan_total=total, plan_used=used, auto_limit=auto)
+            n = await self.session.start(sub_ob, local_limit, self._files(), title=title,
+                                         plan_total=total, plan_used=used, auto_limit=(auto and not agents))
         except Exception as e:
             await self.session.stop()
-            if key:
-                self._save_report(key, "ошибка старта", info, 0, str(e))
+            self._save_report(key, "ошибка старта", info, 0, str(e))
             await put(f"[{title}] ошибка старта: {e}", self._menu_kb())
             return
 
-        extra = f" (+{len(manual)} моих)" if (kind == "key" and manual) else ""
-        head = f"[{title}] выходов:{n}{extra} · воркеров:{self.session.workers}"
-        if auto:
-            head += f" · дожру {fmt_bytes(limit)}"
-        elif limit:
-            head += f" · лимит {fmt_bytes(limit)}"
-        await put(head + "\n\n" + self.session.status(), self._running_kb())
+        ok_agents = []
+        for a in agents:
+            res = await self._agent_call(a, "POST", "/burn", {
+                "url": key["url"], "hwid": hwid, "workers": self._workers(), "limit_bytes": 0,
+            })
+            if res and res.get("ok"):
+                ok_agents.append(a)
+
+        head = f"[{title}] выходов:{n} · воркеров:{self.session.workers}"
+        if agents:
+            head += f" · серверов:{len(ok_agents)}/{len(agents)}"
+        if target:
+            head += f" · цель {fmt_bytes(target)}"
+
+        ab: Dict[str, int] = {}
+
+        def render() -> str:
+            local = self.session.counter.bytes if self.session.counter else 0
+            t = [head, "", self.session.status()]
+            if agents:
+                t.append("🌐 сервера:")
+                for a in agents:
+                    t.append(f"  • {a['name']}: {fmt_bytes(ab.get(a['name'], 0))}")
+                tot = local + sum(ab.values())
+                g = f" / {fmt_bytes(target)}" if target else ""
+                t.append(f"Σ ВСЕГО: {fmt_bytes(tot)}{g}")
+            return "\n".join(t)
+
+        async def poll() -> None:
+            for a in ok_agents:
+                s = await self._agent_call(a, "GET", "/stats")
+                ab[a["name"]] = int((s or {}).get("eaten", 0))
+
+        await put(render(), self._running_kb())
         the_mid = mid
 
         async def _live() -> None:
             try:
                 while self.session.running():
-                    await asyncio.sleep(20)
+                    await asyncio.sleep(15)
+                    await poll()
                     if the_mid:
-                        await self.tg.edit(chat_id, the_mid, head + "\n\n" + self.session.status(), self._running_kb())
+                        await self.tg.edit(chat_id, the_mid, render(), self._running_kb())
+                    local = self.session.counter.bytes if self.session.counter else 0
+                    if target and (local + sum(ab.values())) >= target:
+                        await self.session.stop()
+                        return
             except asyncio.CancelledError:
                 pass
 
@@ -421,18 +361,19 @@ class Bot:
             except BaseException:
                 pass
         live.cancel()
+        for a in ok_agents:
+            await self._agent_call(a, "POST", "/stop")
+        await poll()
 
-        eaten = self.session.counter.bytes if self.session.counter else 0
-        reached = bool(self.session.limit_bytes) and eaten >= self.session.limit_bytes
-        if key:
-            self._save_report(key, "исчерпан — съедено всё" if reached else "остановлен", info, eaten, "")
-        final = self.session.status()
-        await self.session.stop()
+        local = self.session.counter.bytes if self.session.counter else 0
+        total_eaten = local + sum(ab.values())
+        reached = bool(target) and total_eaten >= target
+        self._save_report(key, "исчерпан — съедено всё" if reached else "остановлен", info, total_eaten, "")
         if reached:
-            tail = f"\n\n✅ [{title}] съел {fmt_bytes(eaten)} — лимит/остаток достигнут."
+            tail = f"\n\n✅ [{title}] флот съел {fmt_bytes(total_eaten)} — цель достигнута."
         else:
-            tail = f"\n\n⏹ [{title}] остановлен, съел {fmt_bytes(eaten)}."
-        await put(head + "\n\n" + final + tail, self._menu_kb())
+            tail = f"\n\n⏹ [{title}] остановлен, съедено {fmt_bytes(total_eaten)}."
+        await put(render() + tail, self._menu_kb())
 
     async def _run_indices(self, chat_id: int, indices: List[int], limit_override: int, mid: Optional[int]) -> None:
         if self.busy:
@@ -449,22 +390,10 @@ class Bot:
                 key = self.store.get(i)
                 if not key:
                     continue
-                await self._burn(chat_id, ("key", key), limit_override, mid)
+                await self._burn(chat_id, key, limit_override, mid)
                 done += 1
             if len(indices) > 1 and mid:
-                await self.tg.edit(chat_id, mid, f"🏁 готово: обработано ключей {done}.\n\n" + self._menu_text(), self._menu_kb())
-        finally:
-            self.busy = False
-
-    async def _run_servers(self, chat_id: int, mid: Optional[int]) -> None:
-        if self.busy:
-            if mid:
-                await self.tg.edit(chat_id, mid, "уже работаю. Стоп сначала.", self._running_kb())
-            return
-        self.busy = True
-        self._stop_all = False
-        try:
-            await self._burn(chat_id, ("servers", None), self._take_limit(), mid)
+                await self.tg.edit(chat_id, mid, f"🏁 готово: ключей {done}.\n\n" + self._menu_text(), self._menu_kb())
         finally:
             self.busy = False
 
@@ -535,29 +464,22 @@ class Bot:
     # ---------- callbacks ----------
     async def on_callback(self, chat_id: int, mid: Optional[int], data: str, cb_id: str) -> None:
         await self.tg.answer(cb_id)
-        if data == "menu":
-            if mid:
-                await self.tg.edit(chat_id, mid, self._menu_text(), self._menu_kb())
-        elif data == "keys":
-            if mid:
-                await self.tg.edit(chat_id, mid, self._keys_text(), self._keys_kb())
-        elif data == "servers":
-            if mid:
-                await self.tg.edit(chat_id, mid, self._servers_text(), self._servers_kb())
-        elif data == "targets":
-            if mid:
-                await self.tg.edit(chat_id, mid, self._targets_text(), self._targets_kb())
-        elif data == "settings":
-            if mid:
-                await self.tg.edit(chat_id, mid, self._settings_text(), self._settings_kb())
+        if data == "menu" and mid:
+            await self.tg.edit(chat_id, mid, self._menu_text(), self._menu_kb())
+        elif data == "keys" and mid:
+            await self.tg.edit(chat_id, mid, self._keys_text(), self._keys_kb())
+        elif data == "servers" and mid:
+            await self.tg.edit(chat_id, mid, self._servers_text(), self._servers_kb())
+        elif data == "targets" and mid:
+            await self.tg.edit(chat_id, mid, self._targets_text(), self._targets_kb())
+        elif data == "settings" and mid:
+            await self.tg.edit(chat_id, mid, self._settings_text(), self._settings_kb())
         elif data == "status":
             kb = self._running_kb() if self.session.running() else self._status_kb()
             if mid:
                 await self.tg.edit(chat_id, mid, self.session.status(), kb)
         elif data == "run_all":
             asyncio.create_task(self._run_arg(chat_id, "all", mid))
-        elif data == "srv_run":
-            asyncio.create_task(self._run_servers(chat_id, mid))
         elif data == "stop":
             self._stop_all = True
             if self.session.running():
@@ -567,25 +489,17 @@ class Bot:
         elif data == "addkey":
             self.awaiting[chat_id] = "key"
             if mid:
-                await self.tg.edit(chat_id, mid, "🔑 пришли ссылку на подписку одним сообщением (можно через пробел hwid).", _kb(BACK))
+                await self.tg.edit(chat_id, mid, "🔑 пришли ссылку на подписку (можно через пробел hwid).", _kb(BACK))
         elif data == "addtarget":
             self.awaiting[chat_id] = "target"
             if mid:
-                await self.tg.edit(chat_id, mid, "🎯 пришли URL большого файла (чем жирнее и ближе — тем лучше).", _kb(BACK))
+                await self.tg.edit(chat_id, mid, "🎯 пришли URL большого файла.", _kb(BACK))
         elif data == "srvadd":
+            self.awaiting[chat_id] = "agent"
             if mid:
-                await self.tg.edit(chat_id, mid, "🖥 выбери тип сервера:", self._srvadd_kb())
-        elif data.startswith("srvt:"):
-            t = data[5:]
-            self.awaiting[chat_id] = f"srv:{t}"
-            if t == "uri":
-                prompt = "🖥 пришли ссылку: ss:// / vless:// / vmess:// / trojan:// / hy2:// / socks5:// / http://"
-            else:
-                prompt = (f"🖥 пришли данные {t.upper()} одной строкой:\n"
-                          "host:port  или  host:port:login:password\n"
-                          f"например: 1.2.3.4:1080:user:pass")
-            if mid:
-                await self.tg.edit(chat_id, mid, prompt, _kb([[_btn("⬅️ назад", "servers")]]))
+                await self.tg.edit(chat_id, mid,
+                                   "🖥 пришли агента одной строкой:\nhttp://IP:8787  ТОКЕН\n(выведутся при установке агента на VPS)",
+                                   _kb([[_btn("⬅️ назад", "servers")]]))
         elif data.startswith("run:"):
             asyncio.create_task(self._run_indices(chat_id, [int(data[4:])], self._take_limit(), mid))
         elif data.startswith("check:"):
@@ -602,6 +516,8 @@ class Bot:
             self.store.remove_server(int(data[5:]))
             if mid:
                 await self.tg.edit(chat_id, mid, self._servers_text(), self._servers_kb())
+        elif data.startswith("sping:"):
+            asyncio.create_task(self._ping(chat_id, int(data[6:])))
         elif data.startswith("wrk:"):
             self.store.set_setting("workers", int(data[4:]))
             if mid:
@@ -614,6 +530,18 @@ class Bot:
                     break
             if mid:
                 await self.tg.edit(chat_id, mid, self._settings_text(), self._settings_kb())
+
+    async def _ping(self, chat_id: int, idx: int) -> None:
+        s = self.store.servers[idx] if 0 <= idx < len(self.store.servers) else None
+        if not s:
+            return
+        res = await self._agent_call(s, "GET", "/ping")
+        st = await self._agent_call(s, "GET", "/stats")
+        if res and res.get("ok"):
+            run = (st or {}).get("running")
+            await self.tg.send(chat_id, f"✅ {s['name']} онлайн" + (" · сейчас жрёт" if run else ""))
+        else:
+            await self.tg.send(chat_id, f"⛔ {s['name']} недоступен (проверь IP/порт/firewall/токен)")
 
     # ---------- messages ----------
     async def dispatch(self, chat_id: int, text: str) -> None:
@@ -641,16 +569,21 @@ class Bot:
             added = self.store.add_target(url)
             await self.tg.send(chat_id, "✅ источник добавлен" if added else "уже есть такой.", self._targets_kb())
             return
-        if aw and aw.startswith("srv:"):
-            skind = aw.split(":", 1)[1]
-            try:
-                ob = parse_manual(skind, text)
-            except Exception as e:
-                self.awaiting[chat_id] = aw
-                await self.tg.send(chat_id, f"не понял: {e}\nпопробуй ещё раз.", _kb([[_btn("⬅️ назад", "servers")]]))
+        if aw == "agent":
+            url = _extract_url(text)
+            if not url:
+                self.awaiting[chat_id] = "agent"
+                await self.tg.send(chat_id, "нужен URL вида http://IP:8787 и токен.", _kb([[_btn("⬅️ назад", "servers")]]))
                 return
-            self.store.add_server(ob)
-            await self.tg.send(chat_id, f"✅ сервер добавлен: {ob.get('type')} {ob.get('server')}:{ob.get('server_port')}", self._servers_kb())
+            tok = ""
+            for p in text.split():
+                if p != url and not p.lower().startswith("http"):
+                    tok = p
+                    break
+            s = self.store.add_server(url, token=tok, name=urlparse(url).hostname or url)
+            res = await self._agent_call(s, "GET", "/ping")
+            ok = "✅ онлайн" if (res and res.get("ok")) else "⚠ пока не отвечает"
+            await self.tg.send(chat_id, f"✅ сервер добавлен: {s['name']} ({ok})", self._servers_kb())
             return
 
         if text.startswith("/"):
