@@ -89,6 +89,12 @@ class KeyStore:
                 return i
         return -1
 
+    def key_by_url(self, url: str) -> Optional[Dict]:
+        for k in self.keys:
+            if k.get("url") == url:
+                return k
+        return None
+
     # ---- download targets ----
     def add_target(self, url: str) -> bool:
         if url in self.targets:
@@ -104,7 +110,7 @@ class KeyStore:
             return t
         return None
 
-    # ---- agent servers (extra burner machines) ----
+    # ---- agent servers ----
     def add_server(self, url: str, token: str = "", name: str = "") -> Dict:
         url = url.rstrip("/")
         for s in self.servers:
@@ -125,6 +131,14 @@ class KeyStore:
             self.save()
             return s
         return None
+
+    def set_server_key(self, idx: int, key_url: str) -> None:
+        if 0 <= idx < len(self.servers):
+            if key_url:
+                self.servers[idx]["key_url"] = key_url
+            else:
+                self.servers[idx].pop("key_url", None)
+            self.save()
 
     # ---- settings ----
     def set_setting(self, key: str, value) -> None:
