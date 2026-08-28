@@ -25,22 +25,24 @@ def build_config(outbounds: List[Dict[str, Any]], socks_port: int, log_level: st
         ],
         "outbounds": [
             {
-                "type": "selector",
-                "tag": "proxy",
-                "outbounds": tags,
-                "default": tags[0],
-            },
-            {
                 "type": "urltest",
                 "tag": "auto",
                 "outbounds": tags,
                 "url": "https://www.gstatic.com/generate_204",
-                "interval": "5m",
+                "interval": "1m",
+                "tolerance": 100,
+                "idle_timeout": "5m",
+            },
+            {
+                "type": "selector",
+                "tag": "proxy",
+                "outbounds": ["auto", *tags],
+                "default": "auto",
             },
             *outbounds,
             {"type": "direct", "tag": "direct"},
         ],
-        "route": {"final": "proxy"},
+        "route": {"final": "auto"},
         "experimental": {
             "clash_api": {"external_controller": "127.0.0.1:9090"}
         },
