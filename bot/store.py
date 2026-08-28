@@ -17,6 +17,7 @@ class KeyStore:
         self.path = path
         self.keys: List[Dict] = []
         self.targets: List[str] = []
+        self.servers: List[Dict] = []
         self.settings: Dict = {}
         self._lock = threading.Lock()
         self.load()
@@ -27,10 +28,12 @@ class KeyStore:
                 data = json.load(f)
             self.keys = data.get("keys", []) or []
             self.targets = data.get("targets", []) or []
+            self.servers = data.get("servers", []) or []
             self.settings = data.get("settings", {}) or {}
         except Exception:
             self.keys = []
             self.targets = []
+            self.servers = []
             self.settings = {}
 
     def save(self) -> None:
@@ -40,7 +43,8 @@ class KeyStore:
                 tmp = self.path + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(
-                        {"keys": self.keys, "targets": self.targets, "settings": self.settings},
+                        {"keys": self.keys, "targets": self.targets,
+                         "servers": self.servers, "settings": self.settings},
                         f, ensure_ascii=False, indent=2,
                     )
                 os.replace(tmp, self.path)
@@ -61,13 +65,8 @@ class KeyStore:
                     k["name"] = name
                 self.save()
                 return k
-        key = {
-            "url": url,
-            "hwid": hwid,
-            "name": name or default_name(url),
-            "added_at": int(time.time()),
-            "report": {},
-        }
+        key = {"url": url, "hwid": hwid, "name": name or default_name(url),
+               "added_at": int(time.time()), "report": {}}
         self.keys.append(key)
         self.save()
         return key
@@ -103,6 +102,18 @@ class KeyStore:
             t = self.targets.pop(idx)
             self.save()
             return t
+        return None
+
+    # ---- manual exit servers ----
+    def add_server(self, ob: Dict) -> None:
+        self.servers.append(ob)
+        self.save()
+
+    def remove_server(self, idx: int) -> Optional[Dict]:
+        if 0 <= idx < len(self.servers):
+            s = self.servers.pop(idx)
+            self.save()
+            return s
         return None
 
     # ---- settings ----

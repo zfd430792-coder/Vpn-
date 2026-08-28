@@ -1,10 +1,10 @@
+import urllib.parse as up
 from typing import Dict, List, Optional, Tuple
 
-from .outbound import from_clash_proxies, from_uris
+from .outbound import dedupe_tags, from_clash_proxies, from_uris, parse_uri
 from .subscription import fetch_full, parse
 
 
-# Панели часто отдают реальные ноды только "своему" клиенту (по User-Agent).
 USER_AGENTS: List[str] = [
     "Happ/1.11.1",
     "Happ",
@@ -72,6 +72,49 @@ def is_dummy(ob: dict) -> bool:
     return False
 
 
+def _manual_proxy(kind: str, host: str, port: int, user: str, pw: str) -> dict:
+    t = "socks" if kind == "socks" else "http"
+    ob: dict = {"type": t, "tag": f"{kind}-{host}:{port}", "server": host, "server_port": int(port)}
+    if t == "socks":
+        ob["version"] = "5"
+    if user:
+        ob["username"] = user
+    if pw:
+        ob["password"] = pw
+    return ob
+
+
+def parse_manual(kind: str, text: str) -> dict:
+    """Собрать outbound из ручного ввода.
+
+    kind: 'socks' | 'http' | 'uri'. Форматы:
+      host:port | host:port:login:password (для socks/http)
+      socks5://user:pass@host:port | http://... | ss:// | vless:// | vmess:// | trojan:// | hy2://
+    """
+    text = text.strip()
+    if kind == "uri" or "://" in text:
+        scheme = text.split("://", 1)[0].lower() if "://" in text else ""
+        if scheme in ("socks", "socks5", "socks5h", "http", "https"):
+            u = up.urlparse(text)
+            k = "socks" if scheme.startswith("socks") else "http"
+            port = u.port or (1080 if k == "socks" else 8080)
+            return _manual_proxy(k, u.hostname or "", port,
+                                 up.unquote(u.username or ""), up.unquote(u.password or ""))
+        ob = parse_uri(text)
+        if ob:
+            return ob
+        raise ValueError("не понял ссылку (нужно ss:// / vless:// / vmess:// / trojan:// / socks5:// / http://)")
+    parts = text.split(":", 3)
+    if len(parts) < 2:
+        raise ValueError("нужно host:port или host:port:login:password")
+    host = parts[0].strip()
+    port = int(parts[1].strip())
+    user = parts[2].strip() if len(parts) > 2 else ""
+    pw = parts[3].strip() if len(parts) > 3 else ""
+    k = kind if kind in ("socks", "http") else "socks"
+    return _manual_proxy(k, host, port, user, pw)
+
+
 def _raw_outbounds(body: str) -> List[dict]:
     parsed = parse(body)
     kind = parsed["kind"]
@@ -94,11 +137,6 @@ def fetch_and_load(
     timeout: int = 20,
     hwid: Optional[str] = None,
 ) -> Tuple[List[dict], str, List[dict], Dict[str, int]]:
-    """Перебирает UA (с Happ-заголовками, если HWID), пока не придут реальные ноды.
-
-    Возвращает (real_outbounds, ua_used, raw_outbounds, userinfo).
-    raw_outbounds — всё что отдала подписка (включая заглушки с их тегами).
-    """
     candidates: List[str] = []
     if ua:
         candidates.append(ua)
