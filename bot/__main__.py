@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -16,10 +17,11 @@ async def run(args: argparse.Namespace) -> int:
         body = Path(args.sub_file).read_text()
         outbounds = outbounds_from_body(body)
     else:
-        outbounds, ua_used, raw = fetch_and_load(args.sub, ua=args.ua)
+        outbounds, ua_used, raw = fetch_and_load(args.sub, ua=args.ua, hwid=args.hwid)
         if not outbounds and raw:
             print(
-                f"подписка отдаёт только заглушки (ни один User-Agent не подошёл, узлов-пустышек: {raw})",
+                f"подписка отдаёт только заглушки (узлов-пустышек: {raw}). "
+                "Проверь HWID (--hwid / SUB_HWID) и что подписка живая.",
                 file=sys.stderr,
             )
 
@@ -77,7 +79,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--limit", default="0", help="остановиться после N трафика (100GB, 500MB, 0 = без лимита)")
     p.add_argument("--interval", type=float, default=5.0, help="секунд между строками прогресса")
     p.add_argument("--files", default="", help="файл со списком URL для качания (по строке)")
-    p.add_argument("--ua", default="v2rayN/6.42", help="User-Agent, который пробуется первым (дальше идёт перебор)")
+    p.add_argument("--ua", default=os.environ.get("SUB_UA", "v2rayN/6.42"),
+                   help="User-Agent, который пробуется первым (дальше перебор)")
+    p.add_argument("--hwid", default=os.environ.get("SUB_HWID", ""),
+                   help="HWID устройства для Happ (заголовок x-hwid)")
     p.add_argument("--log-level", default="warn", help="уровень логирования sing-box")
     p.add_argument("--dry-run", action="store_true", help="распарсить подписку и вывести outbounds")
     return p.parse_args(argv)

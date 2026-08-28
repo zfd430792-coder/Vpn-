@@ -2,10 +2,10 @@
 # One-shot installer for vpn-traffic-bot.
 #
 # Usage (as root):
-#   TELEGRAM_BOT_TOKEN='123:AA...' bash install.sh
+#   TELEGRAM_BOT_TOKEN='123:AA...' SUB_HWID='xxxx' bash install.sh
 # or one-liner:
 #   curl -fsSL https://raw.githubusercontent.com/zfd430792-coder/Vpn-/claude/traffic-consuming-bot-iuxyrf/install.sh \
-#     | sudo TELEGRAM_BOT_TOKEN='123:AA...' bash
+#     | sudo TELEGRAM_BOT_TOKEN='123:AA...' SUB_HWID='xxxx' bash
 
 set -euo pipefail
 
@@ -17,6 +17,8 @@ SERVICE_NAME="${SERVICE_NAME:-vpn-traffic-bot}"
 WORKERS="${WORKERS:-32}"
 DEFAULT_LIMIT="${DEFAULT_LIMIT:-0}"
 SOCKS_PORT="${SOCKS_PORT:-10808}"
+SUB_HWID="${SUB_HWID:-}"
+SUB_UA="${SUB_UA:-Happ/1.11.1}"
 SB_FALLBACK_VER="${SB_FALLBACK_VER:-1.11.15}"
 
 msg() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -28,7 +30,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-  err "TELEGRAM_BOT_TOKEN не задан. Пример: TELEGRAM_BOT_TOKEN='123:AA...' bash install.sh"
+  err "TELEGRAM_BOT_TOKEN не задан. Пример: TELEGRAM_BOT_TOKEN='123:AA...' SUB_HWID='xxxx' bash install.sh"
   exit 1
 fi
 
@@ -107,6 +109,8 @@ TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 WORKERS=$WORKERS
 DEFAULT_LIMIT=$DEFAULT_LIMIT
 SOCKS_PORT=$SOCKS_PORT
+SUB_HWID=$SUB_HWID
+SUB_UA=$SUB_UA
 SINGBOX_BIN=/usr/local/bin/sing-box
 ENV
   chmod 0600 "$ENV_DIR/env"

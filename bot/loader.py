@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .outbound import from_clash_proxies, from_uris
 from .subscription import fetch, parse
@@ -22,6 +22,19 @@ USER_AGENTS: List[str] = [
 ]
 
 _DUMMY_SERVERS = {"", "0.0.0.0", "0", "127.0.0.1", "::", "::1", "localhost"}
+
+
+def happ_headers(hwid: Optional[str]) -> Dict[str, str]:
+    """Заголовки, которые шлёт клиент Happ. Ключевой — x-hwid: без него
+    панель на Remnawave отдаёт заглушку вместо реальных узлов."""
+    if not hwid:
+        return {}
+    return {
+        "x-hwid": hwid,
+        "x-device-os": "Android",
+        "x-ver-os": "14",
+        "x-device-model": "Samsung SM-S918B",
+    }
 
 
 def is_dummy(ob: dict) -> bool:
@@ -63,11 +76,12 @@ def fetch_and_load(
     ua: Optional[str] = None,
     uas: Optional[List[str]] = None,
     timeout: int = 20,
+    hwid: Optional[str] = None,
 ) -> Tuple[List[dict], str, int]:
-    """Перебирает User-Agent'ы, пока подписка не отдаст реальные ноды.
+    """Перебирает User-Agent'ы (с Happ-заголовками, если есть HWID), пока
+    подписка не отдаст реальные ноды.
 
-    Возвращает (outbounds, ua_used, raw_seen) — где raw_seen это сколько
-    всего узлов (включая заглушки) отдавала лучшая попытка.
+    Возвращает (outbounds, ua_used, raw_seen).
     """
     candidates: List[str] = []
     if ua:
@@ -80,13 +94,17 @@ def fetch_and_load(
         if u and u not in seen:
             seen.add(u)
             ordered.append(u)
+    # Если есть HWID — Happ-клиенты вперёд.
+    if hwid:
+        ordered.sort(key=lambda u: 0 if "happ" in u.lower() else 1)
 
+    extra = happ_headers(hwid)
     last_err: Optional[Exception] = None
     best_raw = 0
     best_ua = ordered[0] if ordered else ""
     for u in ordered:
         try:
-            body = fetch(url, ua=u, timeout=timeout)
+            body = fetch(url, ua=u, timeout=timeout, headers=extra)
             raw = _raw_outbounds(body)
         except Exception as e:  # noqa: BLE001 - пробуем следующий UA
             last_err = e

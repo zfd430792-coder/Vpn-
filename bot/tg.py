@@ -118,21 +118,21 @@ class TgClient:
 
 
 async def _run_burn(tg: TgClient, chat_id: int, session: BurnSession, sub_url: str,
-                    limit_bytes: int, ua: str) -> None:
+                    limit_bytes: int, ua: str, hwid: str) -> None:
     try:
-        await tg.send(chat_id, "качаю подписку… (перебираю клиенты)")
+        await tg.send(chat_id, "качаю подписку…")
         loop = asyncio.get_event_loop()
         outbounds, ua_used, raw = await loop.run_in_executor(
-            None, lambda: fetch_and_load(sub_url, ua=ua)
+            None, lambda: fetch_and_load(sub_url, ua=ua, hwid=hwid or None)
         )
     except Exception as e:
         await tg.send(chat_id, f"ошибка загрузки подписки: {e}")
         return
     if not outbounds:
+        hint = "" if hwid else " Задай HWID (SUB_HWID) — панель требует его."
         await tg.send(
             chat_id,
-            "подписка отдала только заглушки — ни один клиент (Happ, v2rayNG, sing-box, …) "
-            f"не получил реальных нод (пустышек: {raw}). Проверь, что ссылка живая и не истекла.",
+            f"подписка отдала только заглушки (пустышек: {raw}).{hint}",
         )
         return
     try:
@@ -189,6 +189,7 @@ async def main() -> None:
     port = int(os.environ.get("SOCKS_PORT", "10808"))
     singbox_bin = os.environ.get("SINGBOX_BIN", "sing-box")
     ua = os.environ.get("SUB_UA", "v2rayN/6.42")
+    hwid = os.environ.get("SUB_HWID", "")
     default_limit = units_to_bytes(os.environ.get("DEFAULT_LIMIT", "0"))
     allowed_env = os.environ.get("TELEGRAM_ALLOWED_CHATS", "")
     allowed = {c.strip() for c in allowed_env.split(",") if c.strip()}
@@ -242,7 +243,7 @@ async def main() -> None:
                     continue
                 limit = state["pending_limit"]
                 state["pending_limit"] = default_limit
-                asyncio.create_task(_run_burn(tg, chat_id, session, url, limit, ua))
+                asyncio.create_task(_run_burn(tg, chat_id, session, url, limit, ua, hwid))
 
 
 if __name__ == "__main__":

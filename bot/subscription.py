@@ -1,5 +1,5 @@
 import base64
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import requests
 import yaml
@@ -8,13 +8,21 @@ import yaml
 DEFAULT_UA = "v2rayN/6.42"
 
 
-def fetch(url: str, ua: str = DEFAULT_UA, timeout: int = 20) -> str:
-    resp = requests.get(url, headers={"User-Agent": ua}, timeout=timeout)
+def fetch(
+    url: str,
+    ua: str = DEFAULT_UA,
+    timeout: int = 20,
+    headers: Optional[Dict[str, str]] = None,
+) -> str:
+    h = {"User-Agent": ua, "Accept": "*/*"}
+    if headers:
+        h.update(headers)
+    resp = requests.get(url, headers=h, timeout=timeout)
     resp.raise_for_status()
     return resp.text.strip()
 
 
-def _try_b64(payload: str) -> str | None:
+def _try_b64(payload: str) -> Optional[str]:
     stripped = "".join(payload.split())
     stripped += "=" * (-len(stripped) % 4)
     for decoder in (base64.urlsafe_b64decode, base64.b64decode):
