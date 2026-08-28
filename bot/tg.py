@@ -6,7 +6,7 @@ from typing import List, Optional
 import aiohttp
 
 from .loader import fetch_and_load
-from .report import fmt_bytes, units_to_bytes
+from .report import fmt_bytes, plan_summary, units_to_bytes
 from .singbox import SingBox, build_config
 from .traffic import BIG_FILES, Counter, burn
 
@@ -14,11 +14,11 @@ from .traffic import BIG_FILES, Counter, burn
 API = "https://api.telegram.org"
 
 HELP = (
-    "Пришли ссылку на подписку — начну есть трафик.\n\n"
+    "Пришли ссылку на подписку — начну есть трафик и буду сам обновлять статус.\n\n"
     "Команды:\n"
-    "/status — сколько уже съел\n"
+    "/status — текущий статус\n"
     "/stop — остановить\n"
-    "/limit 100GB — задать лимит для следующего запуска (0 = без лимита)\n"
+    "/limit 100GB — лимит для следующего запуска (0 = остаток плана / без лимита)\n"
     "/help — эта справка"
 )
 
@@ -43,11 +43,15 @@ class BurnSession:
         self.started_at: float = 0.0
         self.limit_bytes: int = 0
         self.node_count: int = 0
+        self.plan_total: int = 0
+        self.plan_used: int = 0
+        self.auto_limit: bool = False
 
     def running(self) -> bool:
         return self.burn_task is not None and not self.burn_task.done()
 
-    async def start(self, outbounds: List[dict], limit_bytes: int) -> int:
+    async def start(self, outbounds: List[dict], limit_bytes: int,
+                    plan_total: int = 0, plan_used: int = 0, auto_limit: bool = False) -> int:
         if self.running():
             raise RuntimeError("уже запущена — сначала /stop")
         if not outbounds:
@@ -58,9 +62,12 @@ class BurnSession:
         self.counter = Counter()
         self.stop_event = asyncio.Event()
         self.limit_bytes = limit_bytes
+        self.plan_total = plan_total
+        self.plan_used = plan_used
+        self.auto_limit = auto_limit
         self.started_at = time.monotonic()
         self.node_count = len(outbounds)
-        socks_url = f"socks5h://127.0.0.1:{self.port}"
+        socks_url = f"socks5://127.0.0.1:{self.port}"
         self.burn_task = asyncio.create_task(
             burn(socks_url, self.workers, limit_bytes, BIG_FILES, self.counter, self.stop_event)
         )
@@ -70,18 +77,26 @@ class BurnSession:
         if not self.counter:
             return "простаиваю. пришли URL подписки."
         elapsed = max(time.monotonic() - self.started_at, 1e-6)
-        rate = self.counter.bytes / elapsed
-        goal = f" / {fmt_bytes(self.limit_bytes)}" if self.limit_bytes else ""
-        state = "работаю" if self.running() else "остановлен"
-        lines = [
-            state,
-            f"нод: {self.node_count}",
-            f"съедено: {fmt_bytes(self.counter.bytes)}{goal}",
-            f"средняя: {fmt_bytes(rate)}/s",
-            f"аптайм: {int(elapsed)}с",
-        ]
-        if self.counter.errors:
-            lines.append(f"ошибок: {self.counter.errors} (посл.: {self.counter.last_error[:120]})")
+        eaten = self.counter.bytes
+        rate = eaten / elapsed
+        state = "🔥 жру трафик" if self.running() else "⏹ остановлен"
+        lines = [state, f"нод: {self.node_count}"]
+        if self.plan_total:
+            used_now = self.plan_used + eaten
+            left = max(self.plan_total - used_now, 0)
+            lines += [
+                "——————————",
+                f"план: {fmt_bytes(used_now)} / {fmt_bytes(self.plan_total)}",
+                f"осталось по плану: {fmt_bytes(left)}",
+            ]
+        lines.append("——————————")
+        lines.append(f"съел за сессию: {fmt_bytes(eaten)}")
+        if self.limit_bytes and not self.auto_limit:
+            lines.append(f"осталось до стопа: {fmt_bytes(max(self.limit_bytes - eaten, 0))}")
+        lines.append(f"скорость: {fmt_bytes(rate)}/s")
+        lines.append(f"аптайм: {int(elapsed)}с")
+        if eaten == 0 and self.counter.errors:
+            lines.append(f"⚠ ошибок: {self.counter.errors} ({self.counter.last_error[:80]})")
         return "\n".join(lines)
 
     async def stop(self) -> None:
@@ -116,42 +131,86 @@ class TgClient:
         except Exception:
             pass
 
+    async def edit(self, chat_id: int, message_id: int, text: str) -> None:
+        try:
+            await self.call("editMessageText", chat_id=chat_id, message_id=message_id,
+                            text=text, disable_web_page_preview=True)
+        except Exception:
+            pass
+
 
 async def _run_burn(tg: TgClient, chat_id: int, session: BurnSession, sub_url: str,
                     limit_bytes: int, ua: str, hwid: str) -> None:
     try:
         await tg.send(chat_id, "качаю подписку…")
         loop = asyncio.get_event_loop()
-        outbounds, ua_used, raw = await loop.run_in_executor(
+        outbounds, ua_used, raw, info = await loop.run_in_executor(
             None, lambda: fetch_and_load(sub_url, ua=ua, hwid=hwid or None)
         )
     except Exception as e:
         await tg.send(chat_id, f"ошибка загрузки подписки: {e}")
         return
     if not outbounds:
-        hint = "" if hwid else " Задай HWID (SUB_HWID) — панель требует его."
-        await tg.send(
-            chat_id,
-            f"подписка отдала только заглушки (пустышек: {raw}).{hint}",
-        )
+        hint = "" if hwid else " Задай HWID (SUB_HWID)."
+        await tg.send(chat_id, f"подписка отдала только заглушки (пустышек: {raw}).{hint}")
         return
+
+    total, used, remaining = plan_summary(info)
+    auto_limit = False
+    if limit_bytes <= 0 and remaining > 0:
+        limit_bytes = remaining
+        auto_limit = True
+
     try:
-        n = await session.start(outbounds, limit_bytes)
+        n = await session.start(outbounds, limit_bytes, plan_total=total,
+                                plan_used=used, auto_limit=auto_limit)
     except Exception as e:
         await tg.send(chat_id, f"ошибка старта: {e}")
         await session.stop()
         return
-    goal = f" (лимит {fmt_bytes(limit_bytes)})" if limit_bytes else ""
-    await tg.send(chat_id, f"UA: {ua_used}\nподнято {n} нод, жру трафик{goal}. /status /stop")
+
+    head = f"UA: {ua_used} · нод: {n}"
+    if not info:
+        head += "\n(квота плана недоступна — панель не отдаёт заголовок)"
+    if auto_limit:
+        head += f"\nдожру остаток плана {fmt_bytes(limit_bytes)} и сам остановлюсь"
+    elif limit_bytes:
+        head += f"\nлимит: {fmt_bytes(limit_bytes)}"
+    else:
+        head += "\nбез лимита — до /stop"
+
+    sent = await tg.call("sendMessage", chat_id=chat_id,
+                         text=head + "\n\n" + session.status(),
+                         disable_web_page_preview=True)
+    message_id = (sent.get("result") or {}).get("message_id") if isinstance(sent, dict) else None
+
+    async def _live() -> None:
+        try:
+            while session.running():
+                await asyncio.sleep(20)
+                if message_id:
+                    await tg.edit(chat_id, message_id, head + "\n\n" + session.status())
+        except asyncio.CancelledError:
+            pass
+
+    live = asyncio.create_task(_live())
     task = session.burn_task
     if task:
         try:
             await task
         except BaseException:
             pass
+    live.cancel()
+
+    reached = bool(session.limit_bytes) and session.counter is not None \
+        and session.counter.bytes >= session.limit_bytes
     final = session.status()
     await session.stop()
-    await tg.send(chat_id, f"готово:\n{final}")
+    tail = "\n\n✅ всё съел — лимит достигнут, остановился." if reached else "\n\n⏹ остановлено."
+    if message_id:
+        await tg.edit(chat_id, message_id, head + "\n\n" + final + tail)
+    else:
+        await tg.send(chat_id, final + tail)
 
 
 async def _handle_command(tg: TgClient, chat_id: int, cmd: str, arg: str,
@@ -176,7 +235,7 @@ async def _handle_command(tg: TgClient, chat_id: int, cmd: str, arg: str,
             await tg.send(chat_id, f"не понял лимит: {e}")
             return
         lim = state["pending_limit"]
-        await tg.send(chat_id, f"лимит: {fmt_bytes(lim) if lim else 'без лимита'}. применю к следующей подписке.")
+        await tg.send(chat_id, f"лимит: {fmt_bytes(lim) if lim else 'остаток плана / без лимита'}. применю к следующей подписке.")
         return
     await tg.send(chat_id, "неизвестная команда. /help")
 

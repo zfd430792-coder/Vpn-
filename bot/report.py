@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Callable
+from typing import Callable, Dict, Tuple
 
 
 def fmt_bytes(value: float) -> str:
@@ -26,6 +26,14 @@ def units_to_bytes(s: str) -> int:
         if s.endswith(suffix):
             return int(float(s[: -len(suffix)]) * mult)
     return int(float(s))
+
+
+def plan_summary(info: Dict[str, int]) -> Tuple[int, int, int]:
+    """(total, used, remaining) из Subscription-Userinfo. 0 если нет данных."""
+    total = int(info.get("total") or 0)
+    used = int(info.get("upload") or 0) + int(info.get("download") or 0)
+    remaining = max(total - used, 0) if total else 0
+    return total, used, remaining
 
 
 async def progress(get_bytes: Callable[[], int], interval: float, limit_bytes: int, stop: asyncio.Event) -> None:

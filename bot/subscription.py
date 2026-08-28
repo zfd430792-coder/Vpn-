@@ -1,5 +1,5 @@
 import base64
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 import yaml
@@ -8,18 +8,28 @@ import yaml
 DEFAULT_UA = "v2rayN/6.42"
 
 
+def fetch_full(
+    url: str,
+    ua: str = DEFAULT_UA,
+    timeout: int = 20,
+    headers: Optional[Dict[str, str]] = None,
+) -> Tuple[str, Dict[str, str]]:
+    h = {"User-Agent": ua, "Accept": "*/*"}
+    if headers:
+        h.update(headers)
+    resp = requests.get(url, headers=h, timeout=timeout)
+    resp.raise_for_status()
+    return resp.text.strip(), dict(resp.headers)
+
+
 def fetch(
     url: str,
     ua: str = DEFAULT_UA,
     timeout: int = 20,
     headers: Optional[Dict[str, str]] = None,
 ) -> str:
-    h = {"User-Agent": ua, "Accept": "*/*"}
-    if headers:
-        h.update(headers)
-    resp = requests.get(url, headers=h, timeout=timeout)
-    resp.raise_for_status()
-    return resp.text.strip()
+    text, _ = fetch_full(url, ua=ua, timeout=timeout, headers=headers)
+    return text
 
 
 def _try_b64(payload: str) -> Optional[str]:

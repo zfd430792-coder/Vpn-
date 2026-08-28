@@ -6,22 +6,22 @@ import sys
 from pathlib import Path
 
 from .loader import fetch_and_load, outbounds_from_body
-from .report import progress, units_to_bytes
+from .report import fmt_bytes, plan_summary, progress, units_to_bytes
 from .singbox import SingBox, build_config
 from .traffic import BIG_FILES, Counter, burn
 
 
 async def run(args: argparse.Namespace) -> int:
+    info: dict = {}
     ua_used = None
     if args.sub_file:
         body = Path(args.sub_file).read_text()
         outbounds = outbounds_from_body(body)
     else:
-        outbounds, ua_used, raw = fetch_and_load(args.sub, ua=args.ua, hwid=args.hwid)
+        outbounds, ua_used, raw, info = fetch_and_load(args.sub, ua=args.ua, hwid=args.hwid)
         if not outbounds and raw:
             print(
-                f"подписка отдаёт только заглушки (узлов-пустышек: {raw}). "
-                "Проверь HWID (--hwid / SUB_HWID) и что подписка живая.",
+                f"подписка отдаёт только заглушки (узлов-пустышек: {raw}). Проверь HWID.",
                 file=sys.stderr,
             )
 
@@ -29,6 +29,12 @@ async def run(args: argparse.Namespace) -> int:
         print(json.dumps(outbounds, indent=2, ensure_ascii=False))
         if ua_used:
             print(f"# UA: {ua_used}, реальных нод: {len(outbounds)}", file=sys.stderr)
+        if info:
+            total, used, remaining = plan_summary(info)
+            print(
+                f"# план: использовано {fmt_bytes(used)} / {fmt_bytes(total)}, осталось {fmt_bytes(remaining)}",
+                file=sys.stderr,
+            )
         return 0
     if not outbounds:
         print("no usable outbounds found in subscription", file=sys.stderr)
@@ -46,13 +52,18 @@ async def run(args: argparse.Namespace) -> int:
 
     config = build_config(outbounds, socks_port=args.port, log_level=args.log_level)
     limit_bytes = units_to_bytes(args.limit)
+    if limit_bytes <= 0 and info:
+        _, _, remaining = plan_summary(info)
+        if remaining > 0:
+            limit_bytes = remaining
+            print(f"лимит = остаток плана: {fmt_bytes(remaining)}", file=sys.stderr)
 
     box = SingBox(binary=args.singbox)
     box.start(config, socks_port=args.port)
     try:
         counter = Counter()
         stop = asyncio.Event()
-        socks_url = f"socks5h://127.0.0.1:{args.port}"
+        socks_url = f"socks5://127.0.0.1:{args.port}"
         report_task = asyncio.create_task(progress(lambda: counter.bytes, args.interval, limit_bytes, stop))
         burn_task = asyncio.create_task(burn(socks_url, args.workers, limit_bytes, files, counter, stop))
         try:
@@ -76,7 +87,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--singbox", default="sing-box", help="путь к бинарнику sing-box")
     p.add_argument("--port", type=int, default=10808, help="локальный SOCKS/HTTP порт")
     p.add_argument("--workers", type=int, default=16, help="количество параллельных загрузок")
-    p.add_argument("--limit", default="0", help="остановиться после N трафика (100GB, 500MB, 0 = без лимита)")
+    p.add_argument("--limit", default="0", help="остановиться после N (100GB / 0 = остаток плана или без лимита)")
     p.add_argument("--interval", type=float, default=5.0, help="секунд между строками прогресса")
     p.add_argument("--files", default="", help="файл со списком URL для качания (по строке)")
     p.add_argument("--ua", default=os.environ.get("SUB_UA", "v2rayN/6.42"),
