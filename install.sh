@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
-# Installer for vpn-traffic-bot. Two roles:
-#   ROLE=bot   (default) — Telegram пульт
-#   ROLE=agent           — доп. VPS, который жрёт параллельно
-#
-# Главный (телега):
-#   curl -fsSL .../install.sh | sudo TELEGRAM_BOT_TOKEN='123:AA' SUB_HWID='xxx' bash
-# Агент на другом VPS:
-#   curl -fsSL .../install.sh | sudo ROLE=agent bash    # токен сгенерится и выведется
-
+# Installer for vpn-traffic-bot. Roles: bot (default) | agent.
 set -euo pipefail
 
 ROLE="${ROLE:-bot}"
@@ -34,53 +26,34 @@ fi
 msg() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; }
 
-if [[ "$(id -u)" -ne 0 ]]; then
-  err "нужно под root (sudo)."; exit 1
-fi
-if [[ "$ROLE" == "bot" && -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-  err "TELEGRAM_BOT_TOKEN не задан (для ROLE=bot)."; exit 1
-fi
+if [[ "$(id -u)" -ne 0 ]]; then err "нужно под root (sudo)."; exit 1; fi
+if [[ "$ROLE" == "bot" && -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then err "TELEGRAM_BOT_TOKEN не задан."; exit 1; fi
 
 install_deps() {
   msg "ставлю пакеты"
   if command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
+    export DEBIAN_FRONTEND=noninteractive; apt-get update -y
     apt-get install -y --no-install-recommends python3 python3-venv python3-pip git curl ca-certificates tar
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y python3 python3-pip git curl ca-certificates tar
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y python3 python3-pip git curl ca-certificates tar
-  elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache python3 py3-pip git curl ca-certificates tar bash
-  else
-    err "неизвестный пакетный менеджер"; exit 1
-  fi
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y python3 python3-pip git curl ca-certificates tar
+  elif command -v yum >/dev/null 2>&1; then yum install -y python3 python3-pip git curl ca-certificates tar
+  elif command -v apk >/dev/null 2>&1; then apk add --no-cache python3 py3-pip git curl ca-certificates tar bash
+  else err "неизвестный пакетный менеджер"; exit 1; fi
 }
-
 install_singbox() {
-  if command -v sing-box >/dev/null 2>&1; then
-    msg "sing-box уже есть"; return
-  fi
+  command -v sing-box >/dev/null 2>&1 && { msg "sing-box есть"; return; }
   msg "ставлю sing-box"
   local arch
   case "$(uname -m)" in
-    x86_64|amd64) arch=amd64 ;;
-    aarch64|arm64) arch=arm64 ;;
-    armv7l) arch=armv7 ;;
+    x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; armv7l) arch=armv7 ;;
     *) err "архитектура $(uname -m) не поддерживается"; exit 1 ;;
   esac
-  local ver
-  ver="$(curl -fsSL 'https://api.github.com/repos/SagerNet/sing-box/releases/latest' | sed -n 's/.*\"tag_name\":[[:space:]]*\"v\([^\"]*\)\".*/\1/p' | head -1 || true)"
+  local ver; ver="$(curl -fsSL 'https://api.github.com/repos/SagerNet/sing-box/releases/latest' | sed -n 's/.*\"tag_name\":[[:space:]]*\"v\([^\"]*\)\".*/\1/p' | head -1 || true)"
   [[ -z "$ver" ]] && ver="$SB_FALLBACK_VER"
   local url="https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-${arch}.tar.gz"
   local tmp; tmp="$(mktemp -d)"
-  curl -fsSL "$url" -o "$tmp/sb.tar.gz"
-  tar -xzf "$tmp/sb.tar.gz" -C "$tmp"
-  install -m 0755 "$tmp/sing-box-${ver}-linux-${arch}/sing-box" /usr/local/bin/sing-box
-  rm -rf "$tmp"
+  curl -fsSL "$url" -o "$tmp/sb.tar.gz"; tar -xzf "$tmp/sb.tar.gz" -C "$tmp"
+  install -m 0755 "$tmp/sing-box-${ver}-linux-${arch}/sing-box" /usr/local/bin/sing-box; rm -rf "$tmp"
 }
-
 fetch_repo() {
   msg "готовлю $INSTALL_DIR"
   if [[ -d "$INSTALL_DIR/.git" ]]; then
@@ -90,40 +63,27 @@ fetch_repo() {
     git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$INSTALL_DIR"
   fi
 }
-
 setup_venv() {
   msg "venv + зависимости"
   python3 -m venv "$INSTALL_DIR/.venv"
   "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip
   "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
 }
-
 write_env() {
   msg "пишу $ENV_DIR/env"
-  install -d -m 0700 "$ENV_DIR"
-  umask 077
+  install -d -m 0700 "$ENV_DIR"; umask 077
   {
-    echo "WORKERS=$WORKERS"
-    echo "DEFAULT_LIMIT=$DEFAULT_LIMIT"
-    echo "SOCKS_PORT=$SOCKS_PORT"
-    echo "SUB_HWID=$SUB_HWID"
-    echo "SUB_UA=$SUB_UA"
-    echo "DATA_DIR=$DATA_DIR"
-    echo "SINGBOX_BIN=/usr/local/bin/sing-box"
-    if [[ "$ROLE" == "agent" ]]; then
-      echo "AGENT_TOKEN=$AGENT_TOKEN"
-      echo "AGENT_PORT=$AGENT_PORT"
-    else
-      echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN"
-    fi
+    echo "WORKERS=$WORKERS"; echo "DEFAULT_LIMIT=$DEFAULT_LIMIT"; echo "SOCKS_PORT=$SOCKS_PORT"
+    echo "SUB_HWID=$SUB_HWID"; echo "SUB_UA=$SUB_UA"; echo "DATA_DIR=$DATA_DIR"
+    echo "REPO_BRANCH=$REPO_BRANCH"; echo "SINGBOX_BIN=/usr/local/bin/sing-box"
+    if [[ "$ROLE" == "agent" ]]; then echo "AGENT_TOKEN=$AGENT_TOKEN"; echo "AGENT_PORT=$AGENT_PORT"
+    else echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN"; fi
   } > "$ENV_DIR/env"
   chmod 0600 "$ENV_DIR/env"
 }
-
 write_service() {
-  msg "пишу systemd unit ($SERVICE_NAME)"
-  local execmod="bot.tg"
-  [[ "$ROLE" == "agent" ]] && execmod="bot.agent"
+  msg "systemd unit ($SERVICE_NAME)"
+  local execmod="bot.tg"; [[ "$ROLE" == "agent" ]] && execmod="bot.agent"
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<UNIT
 [Unit]
 Description=VPN traffic burner ($ROLE)
@@ -149,6 +109,13 @@ UNIT
   systemctl daemon-reload
   systemctl enable --now "${SERVICE_NAME}.service"
 }
+open_firewall() {
+  command -v ufw >/dev/null 2>&1 && ufw allow "${AGENT_PORT}/tcp" >/dev/null 2>&1 || true
+  if command -v firewall-cmd >/dev/null 2>&1; then
+    firewall-cmd --add-port="${AGENT_PORT}/tcp" --permanent >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
 
 install_deps
 install_singbox
@@ -156,15 +123,14 @@ fetch_repo
 setup_venv
 write_env
 write_service
+[[ "$ROLE" == "agent" ]] && open_firewall
 
 sleep 2
 if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
   msg "сервис запущен: $SERVICE_NAME"
   if [[ "$ROLE" == "agent" ]]; then
-    IP="$(curl -fsSL --max-time 5 ifconfig.me 2>/dev/null || echo '<IP-этого-VPS>')"
-    msg "АГЕНТ ГОТОВ. Добавь в бота (🖥 Серверы → ➕ добавить сервер):"
-    printf '\033[1;32m    http://%s:%s  %s\033[0m\n' "$IP" "$AGENT_PORT" "$AGENT_TOKEN"
-    msg "Открой порт $AGENT_PORT/tcp в firewall, если закрыт."
+    IP="$(curl -fsSL --max-time 5 ifconfig.me 2>/dev/null || echo '<IP>')"
+    msg "АГЕНТ ГОТОВ: http://$IP:$AGENT_PORT  token=$AGENT_TOKEN"
   else
     msg "лог: journalctl -u ${SERVICE_NAME} -f"
   fi

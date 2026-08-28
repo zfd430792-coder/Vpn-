@@ -1,5 +1,6 @@
 import asyncio
 import os
+import secrets
 import time
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
@@ -8,6 +9,7 @@ import aiohttp
 
 from .engine import BurnSession
 from .loader import fetch_and_load
+from .provision import provision_agent
 from .report import fmt_bytes, plan_summary, units_to_bytes
 from .store import KeyStore, default_name
 from .traffic import BIG_FILES
@@ -49,6 +51,27 @@ def _kb(rows: List[List[dict]]) -> dict:
 
 
 BACK = [[_btn("⬅️ меню", "menu")]]
+SRV_BACK = [[_btn("⬅️ серверы", "servers")]]
+
+
+def _parse_ssh(text: str):
+    """IP LOGIN PASSWORD [PORT]  или  IP PASSWORD (логин root). Порт — последний числовой."""
+    parts = text.replace(":", " ").split()
+    if len(parts) < 2:
+        return None
+    host = parts[0]
+    rest = parts[1:]
+    port = 22
+    if len(rest) >= 2 and rest[-1].isdigit() and 1 <= int(rest[-1]) <= 65535:
+        port = int(rest[-1])
+        rest = rest[:-1]
+    if len(rest) >= 2:
+        user, password = rest[0], rest[1]
+    elif len(rest) == 1:
+        user, password = "root", rest[0]
+    else:
+        return None
+    return host, port, user, password
 
 
 class TgClient:
@@ -134,11 +157,9 @@ class Bot:
     # ---------- views ----------
     def _menu_text(self) -> str:
         st = "🔥 работаю" if self.session.running() else "💤 простаиваю"
-        return (
-            "🚀 VPN Traffic Bot\n"
-            f"состояние: {st}\n"
-            f"ключей: {len(self.store.keys)} · серверов: {len(self.store.servers)} · воркеров: {self._workers()}"
-        )
+        return ("🚀 VPN Traffic Bot\n"
+                f"состояние: {st}\n"
+                f"ключей: {len(self.store.keys)} · серверов: {len(self.store.servers)} · воркеров: {self._workers()}")
 
     def _menu_kb(self) -> dict:
         return _kb([
@@ -171,11 +192,7 @@ class Bot:
         if self.store.keys:
             rows.append([_btn("▶️ Запустить всё", "run_all")])
         for i in range(len(self.store.keys)):
-            rows.append([
-                _btn(f"▶️ {i + 1}", f"run:{i}"),
-                _btn(f"🔍 {i + 1}", f"check:{i}"),
-                _btn(f"🗑 {i + 1}", f"del:{i}"),
-            ])
+            rows.append([_btn(f"▶️ {i + 1}", f"run:{i}"), _btn(f"🔍 {i + 1}", f"check:{i}"), _btn(f"🗑 {i + 1}", f"del:{i}")])
         rows.append([_btn("➕ добавить ключ", "addkey")])
         rows.append([_btn("⬅️ меню", "menu")])
         return _kb(rows)
@@ -183,8 +200,7 @@ class Bot:
     def _servers_text(self) -> str:
         if not self.store.servers:
             return ("🖥 Доп. серверов нет.\n"
-                    "Другие VPS с агентом жрут ключи параллельно (быстрее).\n"
-                    "Установи агента на VPS и добавь его (URL + токен).")
+                    "Жми «➕ добавить» — пришлёшь SSH-доступ к VPS, бот сам зайдёт, поставит агента и подключит.")
         out = ["🖥 Доп. серверы (→ назначенный ключ):"]
         for i, s in enumerate(self.store.servers, 1):
             ku = s.get("key_url")
@@ -203,17 +219,14 @@ class Bot:
         if self.store.servers:
             rows.append([_btn("🧩 По назначению (каждый свой ключ)", "dist_run")])
         for i in range(len(self.store.servers)):
-            rows.append([_btn(f"🔑 {i + 1}", f"akey:{i}"),
-                         _btn(f"🔌 {i + 1}", f"sping:{i}"),
-                         _btn(f"🗑 {i + 1}", f"sdel:{i}")])
+            rows.append([_btn(f"🔑 {i + 1}", f"akey:{i}"), _btn(f"🔌 {i + 1}", f"sping:{i}"), _btn(f"🗑 {i + 1}", f"sdel:{i}")])
         rows.append([_btn("➕ добавить сервер", "srvadd")])
         rows.append([_btn("⬅️ меню", "menu")])
         return _kb(rows)
 
     def _akey_text(self, ai: int) -> str:
         s = self.store.servers[ai] if 0 <= ai < len(self.store.servers) else None
-        name = s.get("name") if s else "?"
-        return f"🔑 выбери ключ для сервера: {name}"
+        return f"🔑 выбери ключ для сервера: {s.get('name') if s else '?'}"
 
     def _akey_kb(self, ai: int) -> dict:
         rows = []
@@ -282,7 +295,43 @@ class Bot:
                 return f"панель пишет: «{tag[:80]}»"
         return "панель отдаёт только заглушки"
 
-    # ---------- burn one key across whole fleet ----------
+    # ---------- provision agent over SSH ----------
+    async def _provision(self, chat_id: int, host: str, port: int, user: str, password: str) -> None:
+        token = secrets.token_hex(16)
+        aport = 8787
+        url = f"http://{host}:{aport}"
+        sent = await self.tg.send(chat_id, f"🚀 ставлю агента на {host} (SSH порт {port}, юзер {user})…")
+        mid = (sent.get("result") or {}).get("message_id") if isinstance(sent, dict) else None
+        buf: List[str] = []
+        last = [0.0]
+
+        async def on_log(line: str) -> None:
+            buf.append(line)
+            if len(buf) > 14:
+                del buf[:len(buf) - 14]
+            now = time.monotonic()
+            if mid and now - last[0] > 1.5:
+                last[0] = now
+                await self.tg.edit(chat_id, mid, f"🔧 установка на {host}:\n" + "\n".join(buf))
+
+        ok = await provision_agent(host, port, user, password, self.cfg["install_url"], aport, token, on_log)
+        if ok:
+            s = self.store.add_server(url, token=token, name=host)
+            ping = await self._agent_call(s, "GET", "/ping")
+            online = "✅ онлайн" if (ping and ping.get("ok")) else "⚠ агент поставлен, но порт 8787 пока не отвечает (открой 8787/tcp)"
+            text = f"✅ ПОДКЛЮЧЁН НОВЫЙ СЕРВЕР: {host}\n{online}\n{url}"
+            if mid:
+                await self.tg.edit(chat_id, mid, text, self._servers_kb())
+            else:
+                await self.tg.send(chat_id, text, self._servers_kb())
+        else:
+            text = f"⛔ не удалось поставить агента на {host}. проверь IP/логин/пароль/порт SSH.\n\n" + "\n".join(buf[-8:])
+            if mid:
+                await self.tg.edit(chat_id, mid, text, self._servers_kb())
+            else:
+                await self.tg.send(chat_id, text, self._servers_kb())
+
+    # ---------- burn one key across fleet ----------
     async def _burn(self, chat_id: int, key: dict, limit_override: int, mid: Optional[int]) -> None:
         title = key.get("name", "key")
         hwid = key.get("hwid") or self.cfg["hwid"]
@@ -317,14 +366,11 @@ class Bot:
             return
 
         if limit_override > 0:
-            target = limit_override
-            auto = False
+            target, auto = limit_override, False
         elif remaining > 0:
-            target = remaining
-            auto = True
+            target, auto = remaining, True
         else:
-            target = 0
-            auto = False
+            target, auto = 0, False
 
         agents = list(self.store.servers)
         local_limit = 0 if agents else target
@@ -341,8 +387,7 @@ class Bot:
         ok_agents = []
         for a in agents:
             res = await self._agent_call(a, "POST", "/burn", {
-                "url": key["url"], "hwid": hwid, "workers": self._workers(), "limit_bytes": 0,
-            })
+                "url": key["url"], "hwid": hwid, "workers": self._workers(), "limit_bytes": 0})
             if res and res.get("ok"):
                 ok_agents.append(a)
 
@@ -404,13 +449,11 @@ class Bot:
         total_eaten = local + sum(ab.values())
         reached = bool(target) and total_eaten >= target
         self._save_report(key, "исчерпан — съедено всё" if reached else "остановлен", info, total_eaten, "")
-        if reached:
-            tail = f"\n\n✅ [{title}] флот съел {fmt_bytes(total_eaten)} — цель достигнута."
-        else:
-            tail = f"\n\n⏹ [{title}] остановлен, съедено {fmt_bytes(total_eaten)}."
+        tail = (f"\n\n✅ [{title}] флот съел {fmt_bytes(total_eaten)} — цель достигнута."
+                if reached else f"\n\n⏹ [{title}] остановлен, съедено {fmt_bytes(total_eaten)}.")
         await put(render() + tail, self._menu_kb())
 
-    # ---------- distributed: each agent its own key ----------
+    # ---------- distributed ----------
     async def _burn_distributed(self, chat_id: int, mid: Optional[int]) -> None:
         keys = self.store.keys
         agents = self.store.servers
@@ -430,7 +473,6 @@ class Bot:
         if not agents:
             await put("🧩 нет доп. серверов.", self._menu_kb())
             return
-
         await put("🧩 распределяю ключи по серверам…", None)
         local_key = keys[0]
         self.session.workers = self._workers()
@@ -445,7 +487,7 @@ class Bot:
             except Exception:
                 started_local = False
 
-        active = []      # list of (agent, key_name)
+        active = []
         skipped = []
         for a in agents:
             ku = a.get("key_url")
@@ -455,8 +497,7 @@ class Bot:
                 skipped.append(f"{a['name']}({k['name']}:мёртв)")
                 continue
             res = await self._agent_call(a, "POST", "/burn", {
-                "url": k["url"], "hwid": self.cfg["hwid"], "workers": self._workers(), "limit_bytes": rem,
-            })
+                "url": k["url"], "hwid": self.cfg["hwid"], "workers": self._workers(), "limit_bytes": rem})
             if res and res.get("ok"):
                 active.append((a, k["name"]))
             else:
@@ -660,15 +701,18 @@ class Bot:
             self.awaiting[chat_id] = "agent"
             if mid:
                 await self.tg.edit(chat_id, mid,
-                                   "🖥 пришли агента одной строкой:\nhttp://IP:8787  ТОКЕН",
-                                   _kb([[_btn("⬅️ назад", "servers")]]))
+                                   "🖥 пришли SSH-доступ к VPS одной строкой:\n"
+                                   "IP ЛОГИН ПАРОЛЬ [ПОРТ]\n"
+                                   "пример: 1.2.3.4 root MyPass123\n"
+                                   "(если логин root — можно: IP ПАРОЛЬ)\n"
+                                   "бот сам зайдёт и поставит агента.",
+                                   _kb(SRV_BACK))
         elif data.startswith("akey:") and mid:
             ai = int(data[5:])
             await self.tg.edit(chat_id, mid, self._akey_text(ai), self._akey_kb(ai))
         elif data.startswith("setk:"):
             _, ai_s, j_s = data.split(":")
-            ai = int(ai_s)
-            j = int(j_s)
+            ai, j = int(ai_s), int(j_s)
             url = self.store.keys[j]["url"] if 0 <= j < len(self.store.keys) else ""
             self.store.set_server_key(ai, url)
             if mid:
@@ -743,20 +787,25 @@ class Bot:
             await self.tg.send(chat_id, "✅ источник добавлен" if added else "уже есть такой.", self._targets_kb())
             return
         if aw == "agent":
-            url = _extract_url(text)
-            if not url:
-                self.awaiting[chat_id] = "agent"
-                await self.tg.send(chat_id, "нужен URL http://IP:8787 и токен.", _kb([[_btn("⬅️ назад", "servers")]]))
+            u = _extract_url(text)
+            if u:
+                tok = ""
+                for p in text.split():
+                    if p != u and not p.lower().startswith("http"):
+                        tok = p
+                        break
+                s = self.store.add_server(u, token=tok, name=urlparse(u).hostname or u)
+                res = await self._agent_call(s, "GET", "/ping")
+                ok = "✅ онлайн" if (res and res.get("ok")) else "⚠ пока не отвечает"
+                await self.tg.send(chat_id, f"✅ сервер добавлен: {s['name']} ({ok})", self._servers_kb())
                 return
-            tok = ""
-            for p in text.split():
-                if p != url and not p.lower().startswith("http"):
-                    tok = p
-                    break
-            s = self.store.add_server(url, token=tok, name=urlparse(url).hostname or url)
-            res = await self._agent_call(s, "GET", "/ping")
-            ok = "✅ онлайн" if (res and res.get("ok")) else "⚠ пока не отвечает"
-            await self.tg.send(chat_id, f"✅ сервер добавлен: {s['name']} ({ok})", self._servers_kb())
+            ssh = _parse_ssh(text)
+            if not ssh:
+                self.awaiting[chat_id] = "agent"
+                await self.tg.send(chat_id, "формат: IP ЛОГИН ПАРОЛЬ [ПОРТ]  или  IP ПАРОЛЬ", _kb(SRV_BACK))
+                return
+            host, port, user, password = ssh
+            asyncio.create_task(self._provision(chat_id, host, port, user, password))
             return
 
         if text.startswith("/"):
@@ -785,6 +834,7 @@ async def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("TELEGRAM_BOT_TOKEN env var required")
+    branch = os.environ.get("REPO_BRANCH", "claude/traffic-consuming-bot-iuxyrf")
     cfg = {
         "workers": int(os.environ.get("WORKERS", "64")),
         "port": int(os.environ.get("SOCKS_PORT", "10808")),
@@ -792,6 +842,9 @@ async def main() -> None:
         "ua": os.environ.get("SUB_UA", "v2rayN/6.42"),
         "hwid": os.environ.get("SUB_HWID", ""),
         "default_limit": units_to_bytes(os.environ.get("DEFAULT_LIMIT", "0")),
+        "install_url": os.environ.get(
+            "INSTALL_URL",
+            f"https://raw.githubusercontent.com/zfd430792-coder/Vpn-/{branch}/install.sh"),
     }
     data_dir = os.environ.get("DATA_DIR", "/var/lib/vpn-traffic-bot")
     store = KeyStore(os.path.join(data_dir, "keys.json"))
