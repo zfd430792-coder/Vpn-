@@ -16,6 +16,8 @@ class KeyStore:
     def __init__(self, path: str):
         self.path = path
         self.keys: List[Dict] = []
+        self.targets: List[str] = []
+        self.settings: Dict = {}
         self._lock = threading.Lock()
         self.load()
 
@@ -24,8 +26,12 @@ class KeyStore:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.keys = data.get("keys", []) or []
+            self.targets = data.get("targets", []) or []
+            self.settings = data.get("settings", {}) or {}
         except Exception:
             self.keys = []
+            self.targets = []
+            self.settings = {}
 
     def save(self) -> None:
         with self._lock:
@@ -33,7 +39,10 @@ class KeyStore:
                 os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
                 tmp = self.path + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump({"keys": self.keys}, f, ensure_ascii=False, indent=2)
+                    json.dump(
+                        {"keys": self.keys, "targets": self.targets, "settings": self.settings},
+                        f, ensure_ascii=False, indent=2,
+                    )
                 os.replace(tmp, self.path)
                 try:
                     os.chmod(self.path, 0o600)
@@ -42,6 +51,7 @@ class KeyStore:
             except Exception:
                 pass
 
+    # ---- keys ----
     def add(self, url: str, hwid: str = "", name: str = "") -> Dict:
         for k in self.keys:
             if k.get("url") == url:
@@ -79,3 +89,23 @@ class KeyStore:
             if k.get("url") == url:
                 return i
         return -1
+
+    # ---- download targets ----
+    def add_target(self, url: str) -> bool:
+        if url in self.targets:
+            return False
+        self.targets.append(url)
+        self.save()
+        return True
+
+    def remove_target(self, idx: int) -> Optional[str]:
+        if 0 <= idx < len(self.targets):
+            t = self.targets.pop(idx)
+            self.save()
+            return t
+        return None
+
+    # ---- settings ----
+    def set_setting(self, key: str, value) -> None:
+        self.settings[key] = value
+        self.save()
