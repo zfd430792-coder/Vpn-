@@ -63,9 +63,10 @@ async def run(args: argparse.Namespace) -> int:
     try:
         counter = Counter()
         stop = asyncio.Event()
-        socks_url = f"socks5://127.0.0.1:{args.port}"
         report_task = asyncio.create_task(progress(lambda: counter.bytes, args.interval, limit_bytes, stop))
-        burn_task = asyncio.create_task(burn(socks_url, args.workers, limit_bytes, files, counter, stop))
+        burn_task = asyncio.create_task(
+            burn("127.0.0.1", args.port, len(outbounds), args.workers, limit_bytes, files, counter, stop)
+        )
         try:
             await asyncio.gather(report_task, burn_task)
         except asyncio.CancelledError:
@@ -85,8 +86,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     src.add_argument("--sub", help="URL подписки")
     src.add_argument("--sub-file", help="локальный файл с содержимым подписки")
     p.add_argument("--singbox", default="sing-box", help="путь к бинарнику sing-box")
-    p.add_argument("--port", type=int, default=10808, help="локальный SOCKS/HTTP порт")
-    p.add_argument("--workers", type=int, default=16, help="количество параллельных загрузок")
+    p.add_argument("--port", type=int, default=10808, help="базовый локальный SOCKS порт (дальше +1 на каждую ноду)")
+    p.add_argument("--workers", type=int, default=32, help="количество параллельных загрузок")
     p.add_argument("--limit", default="0", help="остановиться после N (100GB / 0 = остаток плана или без лимита)")
     p.add_argument("--interval", type=float, default=5.0, help="секунд между строками прогресса")
     p.add_argument("--files", default="", help="файл со списком URL для качания (по строке)")

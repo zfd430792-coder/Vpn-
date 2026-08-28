@@ -13,16 +13,22 @@ def build_config(outbounds: List[Dict[str, Any]], socks_port: int, log_level: st
     if not outbounds:
         raise ValueError("no outbounds")
     tags = [o["tag"] for o in outbounds]
+    # Отдельный вход на каждую ноду: порт (socks_port + i) жёстко ведёт в ноду i,
+    # чтобы воркеры качали через все ноды сразу и их полосы складывались.
+    inbounds = []
+    rules = []
+    for i, tag in enumerate(tags):
+        itag = f"in-{i}"
+        inbounds.append({
+            "type": "mixed",
+            "tag": itag,
+            "listen": "127.0.0.1",
+            "listen_port": socks_port + i,
+        })
+        rules.append({"inbound": [itag], "outbound": tag})
     return {
         "log": {"level": log_level},
-        "inbounds": [
-            {
-                "type": "mixed",
-                "tag": "mixed-in",
-                "listen": "127.0.0.1",
-                "listen_port": socks_port,
-            }
-        ],
+        "inbounds": inbounds,
         "outbounds": [
             {
                 "type": "urltest",
@@ -31,7 +37,6 @@ def build_config(outbounds: List[Dict[str, Any]], socks_port: int, log_level: st
                 "url": "https://www.gstatic.com/generate_204",
                 "interval": "1m",
                 "tolerance": 100,
-                "idle_timeout": "5m",
             },
             {
                 "type": "selector",
@@ -42,7 +47,7 @@ def build_config(outbounds: List[Dict[str, Any]], socks_port: int, log_level: st
             *outbounds,
             {"type": "direct", "tag": "direct"},
         ],
-        "route": {"final": "auto"},
+        "route": {"rules": rules, "final": "auto"},
         "experimental": {
             "clash_api": {"external_controller": "127.0.0.1:9090"}
         },

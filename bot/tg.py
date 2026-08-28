@@ -67,9 +67,9 @@ class BurnSession:
         self.auto_limit = auto_limit
         self.started_at = time.monotonic()
         self.node_count = len(outbounds)
-        socks_url = f"socks5://127.0.0.1:{self.port}"
         self.burn_task = asyncio.create_task(
-            burn(socks_url, self.workers, limit_bytes, BIG_FILES, self.counter, self.stop_event)
+            burn("127.0.0.1", self.port, self.node_count, self.workers,
+                 limit_bytes, BIG_FILES, self.counter, self.stop_event)
         )
         return len(outbounds)
 
@@ -244,7 +244,7 @@ async def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("TELEGRAM_BOT_TOKEN env var required")
-    workers = int(os.environ.get("WORKERS", "16"))
+    workers = int(os.environ.get("WORKERS", "64"))
     port = int(os.environ.get("SOCKS_PORT", "10808"))
     singbox_bin = os.environ.get("SINGBOX_BIN", "sing-box")
     ua = os.environ.get("SUB_UA", "v2rayN/6.42")
