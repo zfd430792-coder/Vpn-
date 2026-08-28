@@ -2,9 +2,10 @@ import asyncio
 import random
 import time
 from typing import List, Optional
+from urllib.parse import urlparse
 
 import aiohttp
-from aiohttp_socks import ProxyConnector
+from aiohttp_socks import ProxyConnector, ProxyType
 
 
 BIG_FILES: List[str] = [
@@ -42,7 +43,8 @@ class Counter:
 async def _worker(
     idx: int,
     counter: Counter,
-    socks_url: str,
+    socks_host: str,
+    socks_port: int,
     limit_bytes: int,
     files: List[str],
     stop: asyncio.Event,
@@ -52,9 +54,14 @@ async def _worker(
             stop.set()
             return
         url = random.choice(files)
-        connector = ProxyConnector.from_url(socks_url)
-        timeout = aiohttp.ClientTimeout(total=None, sock_read=30, sock_connect=15)
         try:
+            connector = ProxyConnector(
+                proxy_type=ProxyType.SOCKS5,
+                host=socks_host,
+                port=socks_port,
+                rdns=True,
+            )
+            timeout = aiohttp.ClientTimeout(total=None, sock_read=30, sock_connect=15)
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as sess:
                 async with sess.get(url) as resp:
                     if resp.status >= 400:
@@ -75,6 +82,11 @@ async def _worker(
             await asyncio.sleep(1)
 
 
+def _parse_socks(socks_url: str) -> tuple:
+    p = urlparse(socks_url)
+    return (p.hostname or "127.0.0.1", p.port or 10808)
+
+
 async def burn(
     socks_url: str,
     workers: int,
@@ -84,8 +96,9 @@ async def burn(
     stop: Optional[asyncio.Event] = None,
 ) -> None:
     stop = stop or asyncio.Event()
+    host, port = _parse_socks(socks_url)
     tasks = [
-        asyncio.create_task(_worker(i, counter, socks_url, limit_bytes, files, stop))
+        asyncio.create_task(_worker(i, counter, host, port, limit_bytes, files, stop))
         for i in range(workers)
     ]
     try:
