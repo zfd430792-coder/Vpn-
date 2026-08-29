@@ -16,6 +16,7 @@ USER_AGENTS: List[str] = [
     "clash-verge/1.7.7",
     "NekoBox/1.3.5",
     "clash.meta",
+    "clash",
     "v2rayN/6.42",
 ]
 
@@ -55,20 +56,15 @@ def parse_userinfo(headers: Dict[str, str]) -> Dict[str, int]:
 
 
 def is_dummy(ob: dict) -> bool:
+    """Только явно фейковые узлы (локалхост/пустой сервер/порт 0). Реальные не трогаем."""
     server = str(ob.get("server", "")).strip().lower()
     if server in _DUMMY_SERVERS:
         return True
     try:
-        if int(ob.get("server_port") or 0) <= 1:
+        if int(ob.get("server_port") or 0) <= 0:
             return True
     except (TypeError, ValueError):
         return True
-    uuid = str(ob.get("uuid", "")).strip()
-    if uuid and uuid.replace("0", "").replace("-", "") == "":
-        return True
-    if ob.get("type") in ("trojan", "shadowsocks", "hysteria2"):
-        if not str(ob.get("password", "")).strip():
-            return True
     return False
 
 
@@ -85,12 +81,6 @@ def _manual_proxy(kind: str, host: str, port: int, user: str, pw: str) -> dict:
 
 
 def parse_manual(kind: str, text: str) -> dict:
-    """Собрать outbound из ручного ввода.
-
-    kind: 'socks' | 'http' | 'uri'. Форматы:
-      host:port | host:port:login:password (для socks/http)
-      socks5://user:pass@host:port | http://... | ss:// | vless:// | vmess:// | trojan:// | hy2://
-    """
     text = text.strip()
     if kind == "uri" or "://" in text:
         scheme = text.split("://", 1)[0].lower() if "://" in text else ""
@@ -103,7 +93,7 @@ def parse_manual(kind: str, text: str) -> dict:
         ob = parse_uri(text)
         if ob:
             return ob
-        raise ValueError("не понял ссылку (нужно ss:// / vless:// / vmess:// / trojan:// / socks5:// / http://)")
+        raise ValueError("не понял ссылку (ss:// / vless:// / vmess:// / trojan:// / socks5:// / http://)")
     parts = text.split(":", 3)
     if len(parts) < 2:
         raise ValueError("нужно host:port или host:port:login:password")

@@ -55,7 +55,6 @@ SRV_BACK = [[_btn("⬅️ серверы", "servers")]]
 
 
 def _parse_ssh(text: str):
-    """IP LOGIN PASSWORD [PORT]  или  IP PASSWORD (логин root). Порт — последний числовой."""
     parts = text.replace(":", " ").split()
     if len(parts) < 2:
         return None
@@ -178,7 +177,7 @@ class Bot:
             r = k.get("report") or {}
             if r:
                 if r.get("total"):
-                    line += f"\n   план {fmt_bytes(r['used'])}/{fmt_bytes(r['total'])}, ост. {fmt_bytes(r['remaining'])}"
+                    line += f"\n   план {fmt_bytes(r['used'])}/{fmt_bytes(r['total'])}"
                 line += f"\n   {r.get('status', '')} · съел {fmt_bytes(r.get('eaten', 0))} · {_ago(r.get('ts'))}"
                 if r.get("note"):
                     line += f"\n   ({r['note']})"
@@ -200,7 +199,7 @@ class Bot:
     def _servers_text(self) -> str:
         if not self.store.servers:
             return ("🖥 Доп. серверов нет.\n"
-                    "Жми «➕ добавить» — пришлёшь SSH-доступ к VPS, бот сам зайдёт, поставит агента и подключит.")
+                    "Жми «➕ добавить» — пришлёшь SSH-доступ, бот сам поставит агента.")
         out = ["🖥 Доп. серверы (→ назначенный ключ):"]
         for i, s in enumerate(self.store.servers, 1):
             ku = s.get("key_url")
@@ -257,7 +256,7 @@ class Bot:
 
     def _settings_text(self) -> str:
         lim = self.pending_limit
-        lim_s = fmt_bytes(lim) if lim else "Авто (остаток плана)"
+        lim_s = fmt_bytes(lim) if lim else "без лимита (жарит до отключения)"
         return ("⚙️ Настройки\n"
                 f"воркеров: {self._workers()} (больше = больше трафика)\n"
                 f"лимит следующего запуска: {lim_s}")
@@ -265,7 +264,7 @@ class Bot:
     def _settings_kb(self) -> dict:
         cur = self._workers()
         wrow = [_btn(("✅ " if n == cur else "") + str(n), f"wrk:{n}") for n in WORKER_PRESETS]
-        lrow = [_btn("Лимит: Авто", "lim:auto"), _btn("100GB", "lim:100g"),
+        lrow = [_btn("Без лимита", "lim:auto"), _btn("100GB", "lim:100g"),
                 _btn("500GB", "lim:500g"), _btn("1TB", "lim:1t")]
         return _kb([wrow, lrow, [_btn("⬅️ меню", "menu")]])
 
@@ -288,50 +287,14 @@ class Bot:
         if exp and exp < time.time():
             return f"подписка истекла ({time.strftime('%Y-%m-%d', time.gmtime(exp))})"
         if total and used >= total:
-            return "квота плана исчерпана — всё съедено"
+            return "квота плана исчерпана"
         if raw:
             tag = str(raw[0].get("tag") or "").strip()
             if tag:
                 return f"панель пишет: «{tag[:80]}»"
-        return "панель отдаёт только заглушки"
+        return "нет реальных нод"
 
-    # ---------- provision agent over SSH ----------
-    async def _provision(self, chat_id: int, host: str, port: int, user: str, password: str) -> None:
-        token = secrets.token_hex(16)
-        aport = 8787
-        url = f"http://{host}:{aport}"
-        sent = await self.tg.send(chat_id, f"🚀 ставлю агента на {host} (SSH порт {port}, юзер {user})…")
-        mid = (sent.get("result") or {}).get("message_id") if isinstance(sent, dict) else None
-        buf: List[str] = []
-        last = [0.0]
-
-        async def on_log(line: str) -> None:
-            buf.append(line)
-            if len(buf) > 14:
-                del buf[:len(buf) - 14]
-            now = time.monotonic()
-            if mid and now - last[0] > 1.5:
-                last[0] = now
-                await self.tg.edit(chat_id, mid, f"🔧 установка на {host}:\n" + "\n".join(buf))
-
-        ok = await provision_agent(host, port, user, password, self.cfg["install_url"], aport, token, on_log)
-        if ok:
-            s = self.store.add_server(url, token=token, name=host)
-            ping = await self._agent_call(s, "GET", "/ping")
-            online = "✅ онлайн" if (ping and ping.get("ok")) else "⚠ агент поставлен, но порт 8787 пока не отвечает (открой 8787/tcp)"
-            text = f"✅ ПОДКЛЮЧЁН НОВЫЙ СЕРВЕР: {host}\n{online}\n{url}"
-            if mid:
-                await self.tg.edit(chat_id, mid, text, self._servers_kb())
-            else:
-                await self.tg.send(chat_id, text, self._servers_kb())
-        else:
-            text = f"⛔ не удалось поставить агента на {host}. проверь IP/логин/пароль/порт SSH.\n\n" + "\n".join(buf[-8:])
-            if mid:
-                await self.tg.edit(chat_id, mid, text, self._servers_kb())
-            else:
-                await self.tg.send(chat_id, text, self._servers_kb())
-
-    # ---------- burn one key across fleet ----------
+    # ---------- burn one key across fleet (until cutoff) ----------
     async def _burn(self, chat_id: int, key: dict, limit_override: int, mid: Optional[int]) -> None:
         title = key.get("name", "key")
         hwid = key.get("hwid") or self.cfg["hwid"]
@@ -359,25 +322,15 @@ class Bot:
         if not sub_ob:
             reason = self._deadreason(info, raw)
             self._save_report(key, "мёртв/исчерпан", info, 0, reason)
-            txt = f"⛔ [{title}] реальных нод нет — {reason}"
-            if info:
-                txt += f"\nплан: {fmt_bytes(used)} / {fmt_bytes(total)}, осталось {fmt_bytes(remaining)}"
-            await put(txt, self._menu_kb())
+            await put(f"⛔ [{title}] {reason}", self._menu_kb())
             return
 
-        if limit_override > 0:
-            target, auto = limit_override, False
-        elif remaining > 0:
-            target, auto = remaining, True
-        else:
-            target, auto = 0, False
-
+        limit = limit_override  # 0 = без лимита, жарим до отключения
         agents = list(self.store.servers)
-        local_limit = 0 if agents else target
         self.session.workers = self._workers()
         try:
-            n = await self.session.start(sub_ob, local_limit, self._files(), title=title,
-                                         plan_total=total, plan_used=used, auto_limit=(auto and not agents))
+            n = await self.session.start(sub_ob, limit, self._files(), title=title,
+                                         plan_total=total, plan_used=used, auto_limit=False)
         except Exception as e:
             await self.session.stop()
             self._save_report(key, "ошибка старта", info, 0, str(e))
@@ -385,75 +338,75 @@ class Bot:
             return
 
         ok_agents = []
+        run_flags: Dict[str, bool] = {}
         for a in agents:
             res = await self._agent_call(a, "POST", "/burn", {
-                "url": key["url"], "hwid": hwid, "workers": self._workers(), "limit_bytes": 0})
+                "url": key["url"], "hwid": hwid, "workers": self._workers(), "limit_bytes": limit})
             if res and res.get("ok"):
                 ok_agents.append(a)
+                run_flags[a["name"]] = True
 
         head = f"[{title}] выходов:{n} · воркеров:{self.session.workers}"
         if agents:
             head += f" · серверов:{len(ok_agents)}/{len(agents)}"
-        if target:
-            head += f" · цель {fmt_bytes(target)}"
-
+        head += f" · лимит {fmt_bytes(limit)}" if limit else " · до отключения"
         ab: Dict[str, int] = {}
 
         def render() -> str:
             local = self.session.counter.bytes if self.session.counter else 0
             t = [head, "", self.session.status()]
-            if agents:
+            if ok_agents:
                 t.append("🌐 сервера:")
-                for a in agents:
+                for a in ok_agents:
                     t.append(f"  • {a['name']}: {fmt_bytes(ab.get(a['name'], 0))}")
-                tot = local + sum(ab.values())
-                g = f" / {fmt_bytes(target)}" if target else ""
-                t.append(f"Σ ВСЕГО: {fmt_bytes(tot)}{g}")
+            if ok_agents:
+                t.append(f"Σ ВСЕГО: {fmt_bytes(local + sum(ab.values()))}")
             return "\n".join(t)
 
         async def poll() -> None:
             for a in ok_agents:
                 s = await self._agent_call(a, "GET", "/stats")
-                ab[a["name"]] = int((s or {}).get("eaten", 0))
+                if s:
+                    ab[a["name"]] = int(s.get("eaten", 0))
+                    run_flags[a["name"]] = bool(s.get("running"))
 
         await put(render(), self._running_kb())
         the_mid = mid
 
         async def _live() -> None:
             try:
-                while self.session.running():
+                while self.session.running() or any(run_flags.values()):
                     await asyncio.sleep(15)
                     await poll()
                     if the_mid:
                         await self.tg.edit(chat_id, the_mid, render(), self._running_kb())
-                    local = self.session.counter.bytes if self.session.counter else 0
-                    if target and (local + sum(ab.values())) >= target:
-                        await self.session.stop()
+                    if self._stop_all:
+                        if self.session.running():
+                            await self.session.stop()
+                        for a in ok_agents:
+                            await self._agent_call(a, "POST", "/stop")
                         return
             except asyncio.CancelledError:
                 pass
 
         live = asyncio.create_task(_live())
-        task = self.session.burn_task
-        if task:
-            try:
-                await task
-            except BaseException:
-                pass
-        live.cancel()
+        try:
+            await live
+        except BaseException:
+            pass
+        if self.session.running():
+            await self.session.stop()
         for a in ok_agents:
             await self._agent_call(a, "POST", "/stop")
         await poll()
 
         local = self.session.counter.bytes if self.session.counter else 0
         total_eaten = local + sum(ab.values())
-        reached = bool(target) and total_eaten >= target
-        self._save_report(key, "исчерпан — съедено всё" if reached else "остановлен", info, total_eaten, "")
-        tail = (f"\n\n✅ [{title}] флот съел {fmt_bytes(total_eaten)} — цель достигнута."
-                if reached else f"\n\n⏹ [{title}] остановлен, съедено {fmt_bytes(total_eaten)}.")
+        self._save_report(key, "выеден/отключён" if not self._stop_all else "остановлен", info, total_eaten, "")
+        tail = f"\n\n🏁 [{title}] съедено {fmt_bytes(total_eaten)}" + (" (Стоп)" if self._stop_all else " — нода отключилась/выедено")
         await put(render() + tail, self._menu_kb())
 
-    # ---------- distributed ----------
+    # ---------- distributed (each agent its own key, until cutoff) ----------
     async def _burn_distributed(self, chat_id: int, mid: Optional[int]) -> None:
         keys = self.store.keys
         agents = self.store.servers
@@ -481,8 +434,8 @@ class Bot:
         if lob:
             lt, lu, _ = plan_summary(linfo)
             try:
-                await self.session.start(lob, lrem, self._files(), title=local_key["name"],
-                                         plan_total=lt, plan_used=lu, auto_limit=bool(lrem))
+                await self.session.start(lob, 0, self._files(), title=local_key["name"],
+                                         plan_total=lt, plan_used=lu, auto_limit=False)
                 started_local = True
             except Exception:
                 started_local = False
@@ -494,16 +447,16 @@ class Bot:
             k = (self.store.key_by_url(ku) if ku else None) or local_key
             ob, rem, info = await self._key_load(k)
             if not ob:
-                skipped.append(f"{a['name']}({k['name']}:мёртв)")
+                skipped.append(f"{a['name']}({k['name']})")
                 continue
             res = await self._agent_call(a, "POST", "/burn", {
-                "url": k["url"], "hwid": self.cfg["hwid"], "workers": self._workers(), "limit_bytes": rem})
+                "url": k["url"], "hwid": self.cfg["hwid"], "workers": self._workers(), "limit_bytes": 0})
             if res and res.get("ok"):
                 active.append((a, k["name"]))
             else:
                 skipped.append(a["name"])
 
-        head = f"🧩 распределённый жор · серверов:{len(active)}"
+        head = f"🧩 распределённый жор · серверов:{len(active)} · до отключения"
         if skipped:
             head += f" · пропущено:{len(skipped)}"
         ab: Dict[str, int] = {}
@@ -511,12 +464,10 @@ class Bot:
 
         def render() -> str:
             local = self.session.counter.bytes if self.session.counter else 0
-            t = [head, ""]
-            t.append(f"🖥 этот [{local_key['name'] if started_local else '—'}]: {fmt_bytes(local)}")
+            t = [head, "", f"🖥 этот [{local_key['name'] if started_local else '—'}]: {fmt_bytes(local)}"]
             for a, kn in active:
                 t.append(f"🌐 {a['name']} [{kn}]: {fmt_bytes(ab.get(a['name'], 0))}")
-            grand = local + sum(ab.values())
-            t.append(f"Σ ВСЕГО: {fmt_bytes(grand)}")
+            t.append(f"Σ ВСЕГО: {fmt_bytes(local + sum(ab.values()))}")
             return "\n".join(t)
 
         async def poll() -> None:
@@ -531,7 +482,7 @@ class Bot:
 
         async def _live() -> None:
             try:
-                while True:
+                while self.session.running() or any(run_flags.values()):
                     await asyncio.sleep(15)
                     await poll()
                     if the_mid:
@@ -541,8 +492,6 @@ class Bot:
                             await self.session.stop()
                         for a, _ in active:
                             await self._agent_call(a, "POST", "/stop")
-                        return
-                    if not self.session.running() and not any(run_flags.values()):
                         return
             except asyncio.CancelledError:
                 pass
@@ -631,8 +580,8 @@ class Bot:
             reason = self._deadreason(info, raw)
             self._save_report(key, "мёртв/исчерпан", info, prev, reason)
             msg = f"⛔ [{name}] {reason}"
-        if info:
-            msg += f"\nплан: {fmt_bytes(used)} / {fmt_bytes(total)}, осталось {fmt_bytes(remaining)}"
+        if total:
+            msg += f"\nплан (инфо): {fmt_bytes(used)} / {fmt_bytes(total)}"
         await out(msg, kbdone)
 
     async def _run_arg(self, chat_id: int, arg: str, mid: Optional[int]) -> None:
@@ -687,7 +636,9 @@ class Bot:
             self._stop_all = True
             if self.session.running():
                 await self.session.stop()
-            elif mid:
+            for a in list(self.store.servers):
+                await self._agent_call(a, "POST", "/stop")
+            if mid and not self.busy:
                 await self.tg.edit(chat_id, mid, self._menu_text(), self._menu_kb())
         elif data == "addkey":
             self.awaiting[chat_id] = "key"
@@ -701,11 +652,8 @@ class Bot:
             self.awaiting[chat_id] = "agent"
             if mid:
                 await self.tg.edit(chat_id, mid,
-                                   "🖥 пришли SSH-доступ к VPS одной строкой:\n"
-                                   "IP ЛОГИН ПАРОЛЬ [ПОРТ]\n"
-                                   "пример: 1.2.3.4 root MyPass123\n"
-                                   "(если логин root — можно: IP ПАРОЛЬ)\n"
-                                   "бот сам зайдёт и поставит агента.",
+                                   "🖥 пришли SSH-доступ к VPS:\nIP ЛОГИН ПАРОЛЬ [ПОРТ]\n"
+                                   "пример: 1.2.3.4 root MyPass (или IP ПАРОЛЬ если root)\nбот сам поставит агента.",
                                    _kb(SRV_BACK))
         elif data.startswith("akey:") and mid:
             ai = int(data[5:])
@@ -814,6 +762,8 @@ class Bot:
                 self._stop_all = True
                 if self.session.running():
                     await self.session.stop()
+                for a in list(self.store.servers):
+                    await self._agent_call(a, "POST", "/stop")
                 await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
                 return
             await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
@@ -828,6 +778,42 @@ class Bot:
             asyncio.create_task(self._run_indices(chat_id, [idx], self._take_limit(), mid))
             return
         await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
+
+    # ---------- provision agent over SSH ----------
+    async def _provision(self, chat_id: int, host: str, port: int, user: str, password: str) -> None:
+        token = secrets.token_hex(16)
+        aport = 8787
+        url = f"http://{host}:{aport}"
+        sent = await self.tg.send(chat_id, f"🚀 ставлю агента на {host} (SSH {user}@{host}:{port})…")
+        mid = (sent.get("result") or {}).get("message_id") if isinstance(sent, dict) else None
+        buf: List[str] = []
+        last = [0.0]
+
+        async def on_log(line: str) -> None:
+            buf.append(line)
+            if len(buf) > 14:
+                del buf[:len(buf) - 14]
+            now = time.monotonic()
+            if mid and now - last[0] > 1.5:
+                last[0] = now
+                await self.tg.edit(chat_id, mid, f"🔧 установка на {host}:\n" + "\n".join(buf))
+
+        ok = await provision_agent(host, port, user, password, self.cfg["install_url"], aport, token, on_log)
+        if ok:
+            s = self.store.add_server(url, token=token, name=host)
+            ping = await self._agent_call(s, "GET", "/ping")
+            online = "✅ онлайн" if (ping and ping.get("ok")) else "⚠ агент поставлен, но порт 8787 пока не отвечает (открой 8787/tcp)"
+            text = f"✅ ПОДКЛЮЧЁН НОВЫЙ СЕРВЕР: {host}\n{online}\n{url}"
+            if mid:
+                await self.tg.edit(chat_id, mid, text, self._servers_kb())
+            else:
+                await self.tg.send(chat_id, text, self._servers_kb())
+        else:
+            text = f"⛔ не удалось поставить агента на {host}. проверь IP/логин/пароль/порт SSH.\n\n" + "\n".join(buf[-8:])
+            if mid:
+                await self.tg.edit(chat_id, mid, text, self._servers_kb())
+            else:
+                await self.tg.send(chat_id, text, self._servers_kb())
 
 
 async def main() -> None:
