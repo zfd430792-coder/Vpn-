@@ -646,7 +646,7 @@ class Bot:
         elif data == "update_bot":
             await self._do_update_bot(chat_id)
         elif data == "update_agents":
-             n = await self._do_update_agents(chat_id)
+            n = await self._do_update_agents(chat_id)
             await self.tg.send(chat_id, f"🔄 команда обновления отправлена {n}/{len(self.store.servers)} серверам.")
         elif data == "update_all":
             n = await self._do_update_agents(chat_id)
