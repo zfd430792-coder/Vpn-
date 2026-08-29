@@ -20,6 +20,7 @@ API = "https://api.telegram.org"
 
 WORKER_PRESETS = [32, 64, 128, 256]
 LIMIT_PRESETS = [("auto", 0), ("100g", 100 * 1024**3), ("500g", 500 * 1024**3), ("1t", 1024**4)]
+SEP = "━━━━━━━━━━━━━━━"
 
 
 def _extract_url(text: str) -> Optional[str]:
@@ -43,6 +44,21 @@ def _ago(ts: Optional[int]) -> str:
     return f"{d // 86400}д назад"
 
 
+def _dur(sec: float) -> str:
+    sec = int(sec)
+    if sec < 60:
+        return f"{sec}с"
+    m, s = divmod(sec, 60)
+    if m < 60:
+        return f"{m}м {s:02d}с"
+    h, m = divmod(m, 60)
+    return f"{h}ч {m:02d}м"
+
+
+def _sz(v: float) -> str:
+    return fmt_bytes(v).strip()
+
+
 def _btn(text: str, data: str) -> dict:
     return {"text": text, "callback_data": data}
 
@@ -51,8 +67,8 @@ def _kb(rows: List[List[dict]]) -> dict:
     return {"inline_keyboard": rows}
 
 
-BACK = [[_btn("⬅️ меню", "menu")]]
-SRV_BACK = [[_btn("⬅️ серверы", "servers")]]
+BACK = [[_btn("⬅️ Меню", "menu")]]
+SRV_BACK = [[_btn("⬅️ Серверы", "servers")]]
 
 
 def _parse_ssh(text: str):
@@ -158,14 +174,20 @@ class Bot:
 
     # ---------- views ----------
     def _menu_text(self) -> str:
-        st = "🔥 работаю" if self.session.running() else "💤 простаиваю"
-        return ("🚀 VPN Traffic Bot\n"
-                f"состояние: {st}\n"
-                f"ключей: {len(self.store.keys)} · серверов: {len(self.store.servers)} · воркеров: {self._workers()}")
+        st = "🔥 жрёт трафик" if self.session.running() else "💤 простой"
+        return (
+            "🚀  VPN TRAFFIC BOT\n"
+            f"{SEP}\n"
+            f"● {st}\n"
+            f"🔑 ключей: {len(self.store.keys)}     🖥 серверов: {len(self.store.servers)}\n"
+            f"🧵 воркеров: {self._workers()}   🎯 источников: {len(self._files())}\n"
+            f"{SEP}\n"
+            "выбери раздел ↓"
+        )
 
     def _menu_kb(self) -> dict:
         return _kb([
-            [_btn("▶️ Запустить всё", "run_all"), _btn("⏹ Стоп", "stop")],
+            [_btn("▶️ Запустить всё", "run_all"), _btn("⏹ Остановить", "stop")],
             [_btn("🔑 Ключи", "keys"), _btn("🖥 Серверы", "servers")],
             [_btn("🎯 Источники", "targets"), _btn("📊 Статус", "status")],
             [_btn("⚙️ Настройки", "settings")],
@@ -173,106 +195,163 @@ class Bot:
 
     def _keys_text(self) -> str:
         if not self.store.keys:
-            return "🔑 ключей нет.\nЖми «➕ добавить» или кинь ссылку."
-        out = ["🔑 Ключи:"]
+            return ("🔑  КЛЮЧИ\n" + SEP + "\n\n"
+                    "Пусто. Нажми «➕ Добавить ключ»\nили просто кинь ссылку на подписку.")
+        out = ["🔑  КЛЮЧИ ПОДПИСОК", SEP]
         for i, k in enumerate(self.store.keys, 1):
-            line = f"{i}. {k.get('name', 'key')}"
+            out.append(f"{i}.  {k.get('name', 'key')}")
             r = k.get("report") or {}
             if r:
+                st = r.get("status", "")
+                line = f"     {st} · съел {_sz(r.get('eaten', 0))}"
+                if r.get("ts"):
+                    line += f" · {_ago(r.get('ts'))}"
+                out.append(line)
                 if r.get("total"):
-                    line += f"\n   план {fmt_bytes(r['used'])}/{fmt_bytes(r['total'])}"
-                line += f"\n   {r.get('status', '')} · съел {fmt_bytes(r.get('eaten', 0))} · {_ago(r.get('ts'))}"
+                    out.append(f"     план {_sz(r['used'])} / {_sz(r['total'])}")
                 if r.get("note"):
-                    line += f"\n   ({r['note']})"
+                    out.append(f"     ⚠ {r['note']}")
             else:
-                line += "\n   ещё не запускался"
-            out.append(line)
+                out.append("     ещё не запускался")
+        out.append(SEP)
+        out.append("▶️ запуск · 🔍 проверка · 🗑 удалить")
         return "\n".join(out)
 
     def _keys_kb(self) -> dict:
         rows = []
         if self.store.keys:
-            rows.append([_btn("▶️ Запустить всё", "run_all")])
+            rows.append([_btn("▶️ Запустить все ключи", "run_all")])
         for i in range(len(self.store.keys)):
-            rows.append([_btn(f"▶️ {i + 1}", f"run:{i}"), _btn(f"🔍 {i + 1}", f"check:{i}"), _btn(f"🗑 {i + 1}", f"del:{i}")])
-        rows.append([_btn("➕ добавить ключ", "addkey")])
-        rows.append([_btn("⬅️ меню", "menu")])
+            rows.append([
+                _btn(f"▶️ {i + 1}", f"run:{i}"),
+                _btn(f"🔍 {i + 1}", f"check:{i}"),
+                _btn(f"🗑 {i + 1}", f"del:{i}"),
+            ])
+        rows.append([_btn("➕ Добавить ключ", "addkey")])
+        rows.append([_btn("⬅️ Меню", "menu")])
         return _kb(rows)
 
     def _servers_text(self) -> str:
         if not self.store.servers:
-            return ("🖥 Доп. серверов нет.\nЖми «➕ добавить» — пришлёшь SSH-доступ, бот сам поставит агента.")
-        out = ["🖥 Доп. серверы (→ ключ):"]
+            return ("🖥  СЕРВЕРЫ\n" + SEP + "\n\n"
+                    "Доп. серверов нет.\n"
+                    "«➕ Добавить сервер» → пришлёшь SSH-доступ,\n"
+                    "бот сам зайдёт, поставит агента и подключит.\n"
+                    "Несколько машин жрут ключи параллельно = быстрее.")
+        out = ["🖥  СЕРВЕРЫ (жрут параллельно)", SEP]
         for i, s in enumerate(self.store.servers, 1):
             ku = s.get("key_url")
-            kn = (self.store.key_by_url(ku) or {}).get("name", "?") if ku else "общий (#1)"
-            out.append(f"{i}. {s.get('name')} → {kn}")
-        out.append("")
-        out.append("«🧩 По назначению» — каждый свой ключ.")
+            kn = (self.store.key_by_url(ku) or {}).get("name", "?") if ku else "общий (ключ #1)"
+            out.append(f"{i}.  {s.get('name')}")
+            out.append(f"     🔑 {kn}")
+        out.append(SEP)
+        out.append("🔑 назначить ключ · 🔌 пинг · 🗑 удалить")
         return "\n".join(out)
 
     def _servers_kb(self) -> dict:
         rows = []
         if self.store.servers:
-            rows.append([_btn("🧩 По назначению", "dist_run"), _btn("🔄 Обновить серверы", "update_agents")])
+            rows.append([_btn("🧩 Раздать по назначению", "dist_run")])
         for i in range(len(self.store.servers)):
-            rows.append([_btn(f"🔑 {i + 1}", f"akey:{i}"), _btn(f"🔌 {i + 1}", f"sping:{i}"), _btn(f"🗑 {i + 1}", f"sdel:{i}")])
-        rows.append([_btn("➕ добавить сервер", "srvadd")])
-        rows.append([_btn("⬅️ меню", "menu")])
+            rows.append([
+                _btn(f"🔑 {i + 1}", f"akey:{i}"),
+                _btn(f"🔌 {i + 1}", f"sping:{i}"),
+                _btn(f"🗑 {i + 1}", f"sdel:{i}"),
+            ])
+        rows.append([_btn("➕ Добавить сервер", "srvadd")])
+        if self.store.servers:
+            rows.append([_btn("🔄 Обновить серверы", "update_agents")])
+        rows.append([_btn("⬅️ Меню", "menu")])
         return _kb(rows)
 
     def _akey_text(self, ai: int) -> str:
         s = self.store.servers[ai] if 0 <= ai < len(self.store.servers) else None
-        return f"🔑 выбери ключ для сервера: {s.get('name') if s else '?'}"
+        return f"🔑  Ключ для сервера «{s.get('name') if s else '?'}»\n{SEP}\nвыбери, что он будет жрать:"
 
     def _akey_kb(self, ai: int) -> dict:
         rows = []
         for j, k in enumerate(self.store.keys):
-            rows.append([_btn(k.get("name", f"key{j+1}"), f"setk:{ai}:{j}")])
-        rows.append([_btn("✖ снять (общий #1)", f"setk:{ai}:-1")])
-        rows.append([_btn("⬅️ серверы", "servers")])
+            rows.append([_btn(f"🔑 {k.get('name', f'key{j+1}')}", f"setk:{ai}:{j}")])
+        rows.append([_btn("✖ Сбросить (общий #1)", f"setk:{ai}:-1")])
+        rows.append([_btn("⬅️ Серверы", "servers")])
         return _kb(rows)
 
     def _targets_text(self) -> str:
-        out = ["🎯 Источники (откуда качать)",
-               f"встроенных: {len(BIG_FILES)}"]
+        out = ["🎯  ИСТОЧНИКИ (откуда качать)", SEP,
+               f"встроенных: {len(BIG_FILES)}  (Cloudflare, Hetzner, OVH, Tele2…)"]
         if self.store.targets:
+            out.append("")
             out.append("твои:")
             for i, t in enumerate(self.store.targets, 1):
-                out.append(f"{i}. {t}")
+                out.append(f"{i}.  {t}")
         else:
-            out.append("своих пока нет.")
+            out.append("своих пока нет — можно добавить жирные файлы.")
         return "\n".join(out)
 
     def _targets_kb(self) -> dict:
         rows = []
         for i in range(len(self.store.targets)):
-            rows.append([_btn(f"🗑 удалить {i + 1}", f"tdel:{i}")])
-        rows.append([_btn("➕ добавить источник", "addtarget")])
-        rows.append([_btn("⬅️ меню", "menu")])
+            rows.append([_btn(f"🗑 Удалить {i + 1}", f"tdel:{i}")])
+        rows.append([_btn("➕ Добавить источник", "addtarget")])
+        rows.append([_btn("⬅️ Меню", "menu")])
         return _kb(rows)
 
     def _settings_text(self) -> str:
         lim = self.pending_limit
-        lim_s = fmt_bytes(lim) if lim else "без лимита (до отключения)"
-        return ("⚙️ Настройки\n"
-                f"воркеров: {self._workers()}\n"
-                f"лимит следующего запуска: {lim_s}")
+        lim_s = _sz(lim) if lim else "без лимита (до отключения)"
+        return (
+            "⚙️  НАСТРОЙКИ\n"
+            f"{SEP}\n"
+            f"🧵 воркеров: {self._workers()}\n"
+            "     больше = больше трафика (до потолка канала)\n"
+            f"🎯 лимит запуска: {lim_s}\n"
+            f"{SEP}\n"
+            "🔄 обновление — код тянется с GitHub сам"
+        )
 
     def _settings_kb(self) -> dict:
         cur = self._workers()
-        wrow = [_btn(("✅ " if n == cur else "") + str(n), f"wrk:{n}") for n in WORKER_PRESETS]
-        lrow = [_btn("Без лимита", "lim:auto"), _btn("100GB", "lim:100g"),
+        wrow = [_btn(("• " if n == cur else "") + str(n), f"wrk:{n}") for n in WORKER_PRESETS]
+        lrow = [_btn("∞ без лимита", "lim:auto"), _btn("100GB", "lim:100g"),
                 _btn("500GB", "lim:500g"), _btn("1TB", "lim:1t")]
-        return _kb([wrow, lrow,
-                    [_btn("🔄 Обновить бота", "update_bot"), _btn("🔄 Всё", "update_all")],
-                    [_btn("⬅️ меню", "menu")]])
+        return _kb([
+            [_btn("── воркеры ──", "settings")],
+            wrow,
+            [_btn("── лимит ──", "settings")],
+            lrow,
+            [_btn("🔄 Обновить бота", "update_bot"), _btn("🔄 Обновить всё", "update_all")],
+            [_btn("⬅️ Меню", "menu")],
+        ])
 
     def _running_kb(self) -> dict:
-        return _kb([[_btn("⏹ Стоп", "stop"), _btn("🔄 Обновить", "status")]])
+        return _kb([[_btn("⏹ Остановить", "stop"), _btn("🔄 Обновить экран", "status")]])
 
     def _status_kb(self) -> dict:
-        return _kb([[_btn("🔄 Обновить", "status"), _btn("⬅️ меню", "menu")]])
+        return _kb([[_btn("🔄 Обновить экран", "status"), _btn("⬅️ Меню", "menu")]])
+
+    def _status_card(self, title: str = "") -> str:
+        s = self.session
+        if not s.counter:
+            return "💤  ПРОСТОЙ\n" + SEP + "\nДобавь ключ и жми ▶️."
+        elapsed = max(time.monotonic() - s.started_at, 1e-6)
+        eaten = s.counter.bytes
+        rate = eaten / elapsed
+        name = title or s.title
+        head = "🔥  ЖРУ ТРАФИК" if s.running() else "⏹  ОСТАНОВЛЕН"
+        if name:
+            head += f" · {name}"
+        lines = [head, SEP,
+                 f"🍽 съедено:   {_sz(eaten)}",
+                 f"⚡ скорость:  {_sz(rate)}/s",
+                 f"🖧 выходов:   {s.node_count} · воркеров {s.workers}",
+                 f"⏱ аптайм:    {_dur(elapsed)}"]
+        if s.plan_total:
+            lines.append(f"📦 план:      {_sz(s.plan_used + eaten)} / {_sz(s.plan_total)}")
+        if s.limit_bytes:
+            lines.append(f"🎯 до стопа:  {_sz(max(s.limit_bytes - eaten, 0))}")
+        if eaten == 0 and s.counter.errors:
+            lines.append(f"⚠ ошибок: {s.counter.errors} ({s.counter.last_error[:60]})")
+        return "\n".join(lines)
 
     # ---------- reports ----------
     def _save_report(self, key: dict, status: str, info: Dict[str, int], eaten: int, note: str) -> None:
@@ -308,7 +387,7 @@ class Bot:
                 if isinstance(r, dict):
                     mid = (r.get("result") or {}).get("message_id")
 
-        await put(f"[{title}] качаю подписку…", None)
+        await put(f"⏳  {title}\n{SEP}\nкачаю подписку…", None)
         loop = asyncio.get_event_loop()
         try:
             sub_ob, ua_used, raw, info = await loop.run_in_executor(
@@ -316,25 +395,25 @@ class Bot:
             )
         except Exception as e:
             self._save_report(key, "ошибка", {}, 0, str(e))
-            await put(f"[{title}] ошибка загрузки: {e}", self._menu_kb())
+            await put(f"⛔  {title}\n{SEP}\nошибка загрузки: {e}", self._menu_kb())
             return
         total, used, remaining = plan_summary(info)
         if not sub_ob:
             reason = self._deadreason(info, raw)
             self._save_report(key, "мёртв/исчерпан", info, 0, reason)
-            await put(f"⛔ [{title}] {reason}", self._menu_kb())
+            await put(f"⛔  {title}\n{SEP}\n{reason}", self._menu_kb())
             return
 
         limit = limit_override
         agents = list(self.store.servers)
         self.session.workers = self._workers()
         try:
-            n = await self.session.start(sub_ob, limit, self._files(), title=title,
-                                         plan_total=total, plan_used=used, auto_limit=False)
+            await self.session.start(sub_ob, limit, self._files(), title=title,
+                                     plan_total=total, plan_used=used, auto_limit=False)
         except Exception as e:
             await self.session.stop()
             self._save_report(key, "ошибка старта", info, 0, str(e))
-            await put(f"[{title}] ошибка старта: {e}", self._menu_kb())
+            await put(f"⛔  {title}\n{SEP}\nошибка старта: {e}", self._menu_kb())
             return
 
         ok_agents = []
@@ -346,20 +425,17 @@ class Bot:
                 ok_agents.append(a)
                 run_flags[a["name"]] = True
 
-        head = f"[{title}] выходов:{n} · воркеров:{self.session.workers}"
-        if agents:
-            head += f" · серверов:{len(ok_agents)}/{len(agents)}"
-        head += f" · лимит {fmt_bytes(limit)}" if limit else " · до отключения"
         ab: Dict[str, int] = {}
 
         def render() -> str:
-            local = self.session.counter.bytes if self.session.counter else 0
-            t = [head, "", self.session.status()]
+            t = [self._status_card(title)]
             if ok_agents:
-                t.append("🌐 сервера:")
+                local = self.session.counter.bytes if self.session.counter else 0
+                t.append(SEP)
+                t.append(f"🌐 сервера ({len(ok_agents)}):")
                 for a in ok_agents:
-                    t.append(f"  • {a['name']}: {fmt_bytes(ab.get(a['name'], 0))}")
-                t.append(f"Σ ВСЕГО: {fmt_bytes(local + sum(ab.values()))}")
+                    t.append(f"   • {a['name']}: {_sz(ab.get(a['name'], 0))}")
+                t.append(f"Σ ВСЕГО: {_sz(local + sum(ab.values()))}")
             return "\n".join(t)
 
         async def poll() -> None:
@@ -402,8 +478,8 @@ class Bot:
         local = self.session.counter.bytes if self.session.counter else 0
         total_eaten = local + sum(ab.values())
         self._save_report(key, "остановлен" if self._stop_all else "выеден/отключён", info, total_eaten, "")
-        tail = f"\n\n🏁 [{title}] съедено {fmt_bytes(total_eaten)}" + (" (Стоп)" if self._stop_all else " — нода отключилась")
-        await put(render() + tail, self._menu_kb())
+        verdict = "⏹ остановлено" if self._stop_all else "🏁 нода отключилась / выедено"
+        await put(render() + f"\n{SEP}\n{verdict} · итог {_sz(total_eaten)}", self._menu_kb())
 
     async def _burn_distributed(self, chat_id: int, mid: Optional[int]) -> None:
         keys = self.store.keys
@@ -424,7 +500,7 @@ class Bot:
         if not agents:
             await put("🧩 нет доп. серверов.", self._menu_kb())
             return
-        await put("🧩 распределяю ключи…", None)
+        await put("🧩  РАСПРЕДЕЛЁННЫЙ ЖОР\n" + SEP + "\nраздаю ключи по серверам…", None)
         local_key = keys[0]
         self.session.workers = self._workers()
         lob, lrem, linfo = await self._key_load(local_key)
@@ -454,18 +530,19 @@ class Bot:
             else:
                 skipped.append(a["name"])
 
-        head = f"🧩 распределённый жор · серверов:{len(active)} · до отключения"
-        if skipped:
-            head += f" · пропущено:{len(skipped)}"
         ab: Dict[str, int] = {}
         run_flags: Dict[str, bool] = {a["name"]: True for a, _ in active}
 
         def render() -> str:
             local = self.session.counter.bytes if self.session.counter else 0
-            t = [head, "", f"🖥 этот [{local_key['name'] if started_local else '—'}]: {fmt_bytes(local)}"]
+            t = ["🧩  РАСПРЕДЕЛЁННЫЙ ЖОР", SEP,
+                 f"🖥 этот [{local_key['name'] if started_local else '—'}]: {_sz(local)}"]
             for a, kn in active:
-                t.append(f"🌐 {a['name']} [{kn}]: {fmt_bytes(ab.get(a['name'], 0))}")
-            t.append(f"Σ ВСЕГО: {fmt_bytes(local + sum(ab.values()))}")
+                t.append(f"🌐 {a['name']} [{kn}]: {_sz(ab.get(a['name'], 0))}")
+            t.append(SEP)
+            t.append(f"Σ ВСЕГО: {_sz(local + sum(ab.values()))}")
+            if skipped:
+                t.append(f"пропущено: {len(skipped)}")
             return "\n".join(t)
 
         async def poll() -> None:
@@ -506,7 +583,7 @@ class Bot:
         await poll()
         local = self.session.counter.bytes if self.session.counter else 0
         grand = local + sum(ab.values())
-        tail = f"\n\n🏁 готово. Σ съедено {fmt_bytes(grand)}."
+        tail = f"\n{SEP}\n🏁 готово · итог {_sz(grand)}"
         if skipped:
             tail += "\nпропущены: " + ", ".join(skipped)
         await put(render() + tail, self._menu_kb())
@@ -514,7 +591,7 @@ class Bot:
     async def _run_indices(self, chat_id: int, indices: List[int], limit_override: int, mid: Optional[int]) -> None:
         if self.busy:
             if mid:
-                await self.tg.edit(chat_id, mid, "уже работаю. Стоп сначала.", self._running_kb())
+                await self.tg.edit(chat_id, mid, "уже работаю. Останови сначала.", self._running_kb())
             return
         self.busy = True
         self._stop_all = False
@@ -536,7 +613,7 @@ class Bot:
     async def _run_distributed(self, chat_id: int, mid: Optional[int]) -> None:
         if self.busy:
             if mid:
-                await self.tg.edit(chat_id, mid, "уже работаю. Стоп сначала.", self._running_kb())
+                await self.tg.edit(chat_id, mid, "уже работаю. Останови сначала.", self._running_kb())
             return
         self.busy = True
         self._stop_all = False
@@ -546,7 +623,7 @@ class Bot:
             self.busy = False
 
     async def _check(self, chat_id: int, idx: int, mid: Optional[int]) -> None:
-        kbdone = _kb([[_btn("⬅️ ключи", "keys"), _btn("⬅️ меню", "menu")]])
+        kbdone = _kb([[_btn("⬅️ Ключи", "keys"), _btn("⬅️ Меню", "menu")]])
 
         async def out(text: str, kb: Optional[dict]) -> None:
             if mid:
@@ -560,26 +637,26 @@ class Bot:
             return
         name = key.get("name", "key")
         hwid = key.get("hwid") or self.cfg["hwid"]
-        await out(f"🔍 [{name}] проверяю…", None)
+        await out(f"🔍  {name}\n{SEP}\nпроверяю…", None)
         loop = asyncio.get_event_loop()
         try:
             outbounds, ua_used, raw, info = await loop.run_in_executor(
                 None, lambda: fetch_and_load(key["url"], ua=self.cfg["ua"], hwid=hwid or None)
             )
         except Exception as e:
-            await out(f"[{name}] ошибка: {e}", kbdone)
+            await out(f"⛔  {name}\n{SEP}\nошибка: {e}", kbdone)
             return
         total, used, remaining = plan_summary(info)
         prev = key.get("report", {}).get("eaten", 0)
         if outbounds:
             self._save_report(key, "жив", info, prev, "")
-            msg = f"✅ [{name}] жив, нод: {len(outbounds)}"
+            msg = f"✅  {name}\n{SEP}\nжив · нод: {len(outbounds)}"
         else:
             reason = self._deadreason(info, raw)
             self._save_report(key, "мёртв/исчерпан", info, prev, reason)
-            msg = f"⛔ [{name}] {reason}"
+            msg = f"⛔  {name}\n{SEP}\n{reason}"
         if total:
-            msg += f"\nплан (инфо): {fmt_bytes(used)} / {fmt_bytes(total)}"
+            msg += f"\nплан: {_sz(used)} / {_sz(total)}"
         await out(msg, kbdone)
 
     async def _run_arg(self, chat_id: int, arg: str, mid: Optional[int]) -> None:
@@ -638,7 +715,7 @@ class Bot:
         elif data == "status":
             kb = self._running_kb() if self.session.running() else self._status_kb()
             if mid:
-                await self.tg.edit(chat_id, mid, self.session.status(), kb)
+                await self.tg.edit(chat_id, mid, self._status_card(), kb)
         elif data == "run_all":
             asyncio.create_task(self._run_arg(chat_id, "all", mid))
         elif data == "dist_run":
@@ -663,16 +740,25 @@ class Bot:
         elif data == "addkey":
             self.awaiting[chat_id] = "key"
             if mid:
-                await self.tg.edit(chat_id, mid, "🔑 пришли ссылку на подписку (можно через пробел hwid).", _kb(BACK))
+                await self.tg.edit(chat_id, mid,
+                                   "🔑  Добавить ключ\n" + SEP + "\nпришли ссылку на подписку\n(можно через пробел hwid).",
+                                   _kb(BACK))
         elif data == "addtarget":
             self.awaiting[chat_id] = "target"
             if mid:
-                await self.tg.edit(chat_id, mid, "🎯 пришли URL большого файла.", _kb(BACK))
+                await self.tg.edit(chat_id, mid,
+                                   "🎯  Добавить источник\n" + SEP + "\nпришли URL большого файла.",
+                                   _kb(BACK))
         elif data == "srvadd":
             self.awaiting[chat_id] = "agent"
             if mid:
                 await self.tg.edit(chat_id, mid,
-                                   "🖥 SSH-доступ к VPS:\nIP ЛОГИН ПАРОЛЬ [ПОРТ]\nпример: 1.2.3.4 root MyPass\nбот сам поставит агента.",
+                                   "🖥  Добавить сервер\n" + SEP + "\n"
+                                   "пришли SSH-доступ одной строкой:\n"
+                                   "  IP ЛОГИН ПАРОЛЬ [ПОРТ]\n"
+                                   "пример:  1.2.3.4 root MyPass\n"
+                                   "(root → можно  IP ПАРОЛЬ)\n"
+                                   "бот сам зайдёт и поставит агента.",
                                    _kb(SRV_BACK))
         elif data.startswith("akey:") and mid:
             ai = int(data[5:])
