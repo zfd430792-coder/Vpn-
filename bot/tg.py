@@ -2,7 +2,7 @@ import asyncio
 import os
 import secrets
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from urllib.parse import urlparse
 
 import aiohttp
@@ -11,6 +11,7 @@ from .engine import BurnSession
 from .loader import fetch_and_load
 from .provision import provision_agent
 from .report import fmt_bytes, plan_summary, units_to_bytes
+from .selfupdate import local_head, remote_head, run_self_update
 from .store import KeyStore, default_name
 from .traffic import BIG_FILES
 
@@ -112,6 +113,8 @@ class Bot:
         self._stop_all = False
         self.pending_limit = cfg["default_limit"]
         self.awaiting: Dict[int, str] = {}
+        self.chats: Set[int] = set()
+        self._notified_head = ""
 
     def _workers(self) -> int:
         w = self.store.settings.get("workers")
@@ -198,25 +201,20 @@ class Bot:
 
     def _servers_text(self) -> str:
         if not self.store.servers:
-            return ("🖥 Доп. серверов нет.\n"
-                    "Жми «➕ добавить» — пришлёшь SSH-доступ, бот сам поставит агента.")
-        out = ["🖥 Доп. серверы (→ назначенный ключ):"]
+            return ("🖥 Доп. серверов нет.\nЖми «➕ добавить» — пришлёшь SSH-доступ, бот сам поставит агента.")
+        out = ["🖥 Доп. серверы (→ ключ):"]
         for i, s in enumerate(self.store.servers, 1):
             ku = s.get("key_url")
-            if ku:
-                k = self.store.key_by_url(ku)
-                kn = k["name"] if k else "?"
-            else:
-                kn = "общий (#1)"
+            kn = (self.store.key_by_url(ku) or {}).get("name", "?") if ku else "общий (#1)"
             out.append(f"{i}. {s.get('name')} → {kn}")
         out.append("")
-        out.append("«🧩 По назначению» — каждый жрёт свой ключ.")
+        out.append("«🧩 По назначению» — каждый свой ключ.")
         return "\n".join(out)
 
     def _servers_kb(self) -> dict:
         rows = []
         if self.store.servers:
-            rows.append([_btn("🧩 По назначению (каждый свой ключ)", "dist_run")])
+            rows.append([_btn("🧩 По назначению", "dist_run"), _btn("🔄 Обновить серверы", "update_agents")])
         for i in range(len(self.store.servers)):
             rows.append([_btn(f"🔑 {i + 1}", f"akey:{i}"), _btn(f"🔌 {i + 1}", f"sping:{i}"), _btn(f"🗑 {i + 1}", f"sdel:{i}")])
         rows.append([_btn("➕ добавить сервер", "srvadd")])
@@ -237,7 +235,7 @@ class Bot:
 
     def _targets_text(self) -> str:
         out = ["🎯 Источники (откуда качать)",
-               f"встроенных: {len(BIG_FILES)} (Cloudflare/Hetzner/OVH/Tele2…)"]
+               f"встроенных: {len(BIG_FILES)}"]
         if self.store.targets:
             out.append("твои:")
             for i, t in enumerate(self.store.targets, 1):
@@ -256,9 +254,9 @@ class Bot:
 
     def _settings_text(self) -> str:
         lim = self.pending_limit
-        lim_s = fmt_bytes(lim) if lim else "без лимита (жарит до отключения)"
+        lim_s = fmt_bytes(lim) if lim else "без лимита (до отключения)"
         return ("⚙️ Настройки\n"
-                f"воркеров: {self._workers()} (больше = больше трафика)\n"
+                f"воркеров: {self._workers()}\n"
                 f"лимит следующего запуска: {lim_s}")
 
     def _settings_kb(self) -> dict:
@@ -266,7 +264,9 @@ class Bot:
         wrow = [_btn(("✅ " if n == cur else "") + str(n), f"wrk:{n}") for n in WORKER_PRESETS]
         lrow = [_btn("Без лимита", "lim:auto"), _btn("100GB", "lim:100g"),
                 _btn("500GB", "lim:500g"), _btn("1TB", "lim:1t")]
-        return _kb([wrow, lrow, [_btn("⬅️ меню", "menu")]])
+        return _kb([wrow, lrow,
+                    [_btn("🔄 Обновить бота", "update_bot"), _btn("🔄 Всё", "update_all")],
+                    [_btn("⬅️ меню", "menu")]])
 
     def _running_kb(self) -> dict:
         return _kb([[_btn("⏹ Стоп", "stop"), _btn("🔄 Обновить", "status")]])
@@ -294,7 +294,7 @@ class Bot:
                 return f"панель пишет: «{tag[:80]}»"
         return "нет реальных нод"
 
-    # ---------- burn one key across fleet (until cutoff) ----------
+    # ---------- burn until cutoff ----------
     async def _burn(self, chat_id: int, key: dict, limit_override: int, mid: Optional[int]) -> None:
         title = key.get("name", "key")
         hwid = key.get("hwid") or self.cfg["hwid"]
@@ -325,7 +325,7 @@ class Bot:
             await put(f"⛔ [{title}] {reason}", self._menu_kb())
             return
 
-        limit = limit_override  # 0 = без лимита, жарим до отключения
+        limit = limit_override
         agents = list(self.store.servers)
         self.session.workers = self._workers()
         try:
@@ -359,7 +359,6 @@ class Bot:
                 t.append("🌐 сервера:")
                 for a in ok_agents:
                     t.append(f"  • {a['name']}: {fmt_bytes(ab.get(a['name'], 0))}")
-            if ok_agents:
                 t.append(f"Σ ВСЕГО: {fmt_bytes(local + sum(ab.values()))}")
             return "\n".join(t)
 
@@ -402,11 +401,10 @@ class Bot:
 
         local = self.session.counter.bytes if self.session.counter else 0
         total_eaten = local + sum(ab.values())
-        self._save_report(key, "выеден/отключён" if not self._stop_all else "остановлен", info, total_eaten, "")
-        tail = f"\n\n🏁 [{title}] съедено {fmt_bytes(total_eaten)}" + (" (Стоп)" if self._stop_all else " — нода отключилась/выедено")
+        self._save_report(key, "остановлен" if self._stop_all else "выеден/отключён", info, total_eaten, "")
+        tail = f"\n\n🏁 [{title}] съедено {fmt_bytes(total_eaten)}" + (" (Стоп)" if self._stop_all else " — нода отключилась")
         await put(render() + tail, self._menu_kb())
 
-    # ---------- distributed (each agent its own key, until cutoff) ----------
     async def _burn_distributed(self, chat_id: int, mid: Optional[int]) -> None:
         keys = self.store.keys
         agents = self.store.servers
@@ -426,7 +424,7 @@ class Bot:
         if not agents:
             await put("🧩 нет доп. серверов.", self._menu_kb())
             return
-        await put("🧩 распределяю ключи по серверам…", None)
+        await put("🧩 распределяю ключи…", None)
         local_key = keys[0]
         self.session.workers = self._workers()
         lob, lrem, linfo = await self._key_load(local_key)
@@ -611,8 +609,21 @@ class Bot:
             indices = [idx]
         await self._run_indices(chat_id, indices, self._take_limit(), mid)
 
+    async def _do_update_bot(self, chat_id: int) -> None:
+        await self.tg.send(chat_id, "🔄 обновляюсь до последней версии, вернусь через ~1 мин…")
+        run_self_update(self.cfg["install_dir"], self.cfg["branch"], self.cfg["service"])
+
+    async def _do_update_agents(self, chat_id: int) -> int:
+        ok = 0
+        for a in list(self.store.servers):
+            r = await self._agent_call(a, "POST", "/update")
+            if r and r.get("ok"):
+                ok += 1
+        return ok
+
     # ---------- callbacks ----------
     async def on_callback(self, chat_id: int, mid: Optional[int], data: str, cb_id: str) -> None:
+        self.chats.add(chat_id)
         await self.tg.answer(cb_id)
         if data == "menu" and mid:
             await self.tg.edit(chat_id, mid, self._menu_text(), self._menu_kb())
@@ -632,6 +643,15 @@ class Bot:
             asyncio.create_task(self._run_arg(chat_id, "all", mid))
         elif data == "dist_run":
             asyncio.create_task(self._run_distributed(chat_id, mid))
+        elif data == "update_bot":
+            await self._do_update_bot(chat_id)
+        elif data == "update_agents":
+             n = await self._do_update_agents(chat_id)
+            await self.tg.send(chat_id, f"🔄 команда обновления отправлена {n}/{len(self.store.servers)} серверам.")
+        elif data == "update_all":
+            n = await self._do_update_agents(chat_id)
+            await self.tg.send(chat_id, f"🔄 серверам: {n}/{len(self.store.servers)}. теперь бот…")
+            await self._do_update_bot(chat_id)
         elif data == "stop":
             self._stop_all = True
             if self.session.running():
@@ -652,8 +672,7 @@ class Bot:
             self.awaiting[chat_id] = "agent"
             if mid:
                 await self.tg.edit(chat_id, mid,
-                                   "🖥 пришли SSH-доступ к VPS:\nIP ЛОГИН ПАРОЛЬ [ПОРТ]\n"
-                                   "пример: 1.2.3.4 root MyPass (или IP ПАРОЛЬ если root)\nбот сам поставит агента.",
+                                   "🖥 SSH-доступ к VPS:\nIP ЛОГИН ПАРОЛЬ [ПОРТ]\nпример: 1.2.3.4 root MyPass\nбот сам поставит агента.",
                                    _kb(SRV_BACK))
         elif data.startswith("akey:") and mid:
             ai = int(data[5:])
@@ -708,8 +727,25 @@ class Bot:
         else:
             await self.tg.send(chat_id, f"⛔ {s['name']} недоступен (IP/порт/firewall/токен)")
 
+    # ---------- update watcher ----------
+    async def update_watcher(self) -> None:
+        loop = asyncio.get_event_loop()
+        while True:
+            await asyncio.sleep(1800)
+            try:
+                loc = await loop.run_in_executor(None, lambda: local_head(self.cfg["install_dir"]))
+                rem = await loop.run_in_executor(None, lambda: remote_head(self.cfg["install_dir"], self.cfg["branch"]))
+            except Exception:
+                continue
+            if rem and loc and rem != loc and rem != self._notified_head and self.chats:
+                self._notified_head = rem
+                kb = _kb([[_btn("🔄 Обновить всё", "update_all")], [_btn("позже", "menu")]])
+                for c in list(self.chats):
+                    await self.tg.send(c, "🔔 Доступно обновление бота.", kb)
+
     # ---------- messages ----------
     async def dispatch(self, chat_id: int, text: str) -> None:
+        self.chats.add(chat_id)
         aw = self.awaiting.pop(chat_id, None)
         if aw == "key":
             url = _extract_url(text)
@@ -766,6 +802,9 @@ class Bot:
                     await self._agent_call(a, "POST", "/stop")
                 await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
                 return
+            if cmd == "/update":
+                await self._do_update_bot(chat_id)
+                return
             await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
             return
 
@@ -779,7 +818,7 @@ class Bot:
             return
         await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
 
-    # ---------- provision agent over SSH ----------
+    # ---------- provision over SSH ----------
     async def _provision(self, chat_id: int, host: str, port: int, user: str, password: str) -> None:
         token = secrets.token_hex(16)
         aport = 8787
@@ -802,18 +841,12 @@ class Bot:
         if ok:
             s = self.store.add_server(url, token=token, name=host)
             ping = await self._agent_call(s, "GET", "/ping")
-            online = "✅ онлайн" if (ping and ping.get("ok")) else "⚠ агент поставлен, но порт 8787 пока не отвечает (открой 8787/tcp)"
+            online = "✅ онлайн" if (ping and ping.get("ok")) else "⚠ агент поставлен, но порт 8787 не отвечает (открой 8787/tcp)"
             text = f"✅ ПОДКЛЮЧЁН НОВЫЙ СЕРВЕР: {host}\n{online}\n{url}"
-            if mid:
-                await self.tg.edit(chat_id, mid, text, self._servers_kb())
-            else:
-                await self.tg.send(chat_id, text, self._servers_kb())
+            await (self.tg.edit(chat_id, mid, text, self._servers_kb()) if mid else self.tg.send(chat_id, text, self._servers_kb()))
         else:
             text = f"⛔ не удалось поставить агента на {host}. проверь IP/логин/пароль/порт SSH.\n\n" + "\n".join(buf[-8:])
-            if mid:
-                await self.tg.edit(chat_id, mid, text, self._servers_kb())
-            else:
-                await self.tg.send(chat_id, text, self._servers_kb())
+            await (self.tg.edit(chat_id, mid, text, self._servers_kb()) if mid else self.tg.send(chat_id, text, self._servers_kb()))
 
 
 async def main() -> None:
@@ -828,6 +861,9 @@ async def main() -> None:
         "ua": os.environ.get("SUB_UA", "v2rayN/6.42"),
         "hwid": os.environ.get("SUB_HWID", ""),
         "default_limit": units_to_bytes(os.environ.get("DEFAULT_LIMIT", "0")),
+        "branch": branch,
+        "install_dir": os.environ.get("INSTALL_DIR", "/opt/vpn-traffic-bot"),
+        "service": os.environ.get("SERVICE_NAME", "vpn-traffic-bot"),
         "install_url": os.environ.get(
             "INSTALL_URL",
             f"https://raw.githubusercontent.com/zfd430792-coder/Vpn-/{branch}/install.sh"),
@@ -844,6 +880,7 @@ async def main() -> None:
             raise SystemExit(f"getMe failed: {me}")
         print(f"bot up: @{me['result'].get('username')} | keys: {len(store.keys)} servers: {len(store.servers)}", flush=True)
         bot = Bot(tg, store, cfg)
+        asyncio.create_task(bot.update_watcher())
         offset = 0
         while True:
             try:

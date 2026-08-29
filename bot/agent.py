@@ -5,6 +5,7 @@ from aiohttp import web
 
 from .engine import BurnSession
 from .loader import fetch_and_load
+from .selfupdate import run_self_update
 from .traffic import BIG_FILES
 
 
@@ -23,6 +24,9 @@ async def main() -> None:
     singbox = os.environ.get("SINGBOX_BIN", "sing-box")
     ua = os.environ.get("SUB_UA", "v2rayN/6.42")
     hwid_env = os.environ.get("SUB_HWID", "")
+    install_dir = os.environ.get("INSTALL_DIR", "/opt/vpn-traffic-bot")
+    branch = os.environ.get("REPO_BRANCH", "claude/traffic-consuming-bot-iuxyrf")
+    service = os.environ.get("SERVICE_NAME", "vpn-traffic-agent")
 
     engine = BurnSession(workers, singbox, socks_port)
 
@@ -76,12 +80,19 @@ async def main() -> None:
         await engine.stop()
         return web.json_response({"ok": True})
 
+    async def do_update(req):
+        if not _auth(req, token):
+            return web.json_response({"ok": False, "error": "auth"}, status=401)
+        run_self_update(install_dir, branch, service)
+        return web.json_response({"ok": True})
+
     app = web.Application()
     app.add_routes([
         web.get("/ping", ping),
         web.get("/stats", stats),
         web.post("/burn", do_burn),
         web.post("/stop", do_stop),
+        web.post("/update", do_update),
     ])
     runner = web.AppRunner(app)
     await runner.setup()

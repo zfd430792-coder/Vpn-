@@ -75,7 +75,8 @@ write_env() {
   {
     echo "WORKERS=$WORKERS"; echo "DEFAULT_LIMIT=$DEFAULT_LIMIT"; echo "SOCKS_PORT=$SOCKS_PORT"
     echo "SUB_HWID=$SUB_HWID"; echo "SUB_UA=$SUB_UA"; echo "DATA_DIR=$DATA_DIR"
-    echo "REPO_BRANCH=$REPO_BRANCH"; echo "SINGBOX_BIN=/usr/local/bin/sing-box"
+    echo "REPO_BRANCH=$REPO_BRANCH"; echo "INSTALL_DIR=$INSTALL_DIR"; echo "SERVICE_NAME=$SERVICE_NAME"
+    echo "SINGBOX_BIN=/usr/local/bin/sing-box"
     if [[ "$ROLE" == "agent" ]]; then echo "AGENT_TOKEN=$AGENT_TOKEN"; echo "AGENT_PORT=$AGENT_PORT"
     else echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN"; fi
   } > "$ENV_DIR/env"
@@ -99,8 +100,6 @@ StateDirectory=vpn-traffic-bot
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
-NoNewPrivileges=true
-ProtectSystem=full
 ProtectHome=true
 
 [Install]
