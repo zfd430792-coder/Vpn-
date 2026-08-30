@@ -100,6 +100,13 @@ def _all_placeholders(outbounds: List[dict]) -> bool:
     return bool(outbounds) and all(_is_placeholder(o.get("tag")) for o in outbounds)
 
 
+_HWID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def _rand_hwid() -> str:
+    return "".join(secrets.choice(_HWID_ALPHABET) for _ in range(16))
+
+
 def _btn(text: str, data: str) -> dict:
     return {"text": text, "callback_data": data}
 
@@ -478,9 +485,11 @@ class Bot:
             self._save_report(key, "заглушки/HWID", info, 0, "панель скрыла ноды")
             i = self.store.index_of(key["url"])
             await put(f"🔒  {title}\n{SEP}\nпанель отдала только заглушки — реальные\n"
-                      "ноды скрыты. Не принят HWID/клиент. Задай HWID\n"
-                      "этой панели и повтори.",
-                      _kb([[_btn("🆔 Задать HWID", f"hwid:{i}")], [_btn("⬅️ Меню", "menu")]]))
+                      "ноды скрыты. Не принят HWID/клиент.\n"
+                      "жми 🎲 — бот подберёт HWID и перепроверит.",
+                      _kb([[_btn("🎲 Случайный HWID", f"rnd:{i}")],
+                           [_btn("🆔 Задать вручную", f"hwid:{i}")],
+                           [_btn("⬅️ Меню", "menu")]]))
             return
         sub_ob = _filter_geo(sub_ob, key.get("country"))
         if key.get("country"):
@@ -777,7 +786,9 @@ class Bot:
                    "реальные ноды скрыты — не принят HWID/клиент.\n"
                    "нужен HWID устройства, зарегистрированного в ЭТОЙ\n"
                    "панели (у ruvpn и midas — РАЗНЫЕ). Задай ниже:")
-            await out(msg, _kb([[_btn("🆔 Задать HWID", f"hwid:{idx}")], [_btn("⬅️ Ключи", "keys")]]))
+            await out(msg, _kb([[_btn("🎲 Случайный HWID", f"rnd:{idx}")],
+                                [_btn("🆔 Задать вручную", f"hwid:{idx}")],
+                                [_btn("⬅️ Ключи", "keys")]]))
             return
         if outbounds:
             self._save_report(key, "жив", info, prev, "")
@@ -945,11 +956,19 @@ class Bot:
                     chat_id, mid,
                     f"🆔  HWID для «{(key or {}).get('name', '?')}»\n{SEP}\n"
                     f"сейчас: {cur}\n{SEP}\n"
-                    "пришли HWID устройства, зарегистрированного в ЭТОЙ панели.\n"
-                    "где взять: в приложении Happ → та же подписка → её HWID,\n"
-                    "или в мини-приложении/панели провайдера в списке устройств.\n"
-                    "чтобы стереть — пришли «-».",
-                    _kb([[_btn("⬅️ Ключи", "keys")]]))
+                    "🎲 Случайный — бот сгенерит и попробует (сядет на\n"
+                    "     свободный слот устройства, часто этого хватает).\n"
+                    "или пришли свой HWID (тот же, что у подписки в Happ).\n"
+                    "стереть — пришли «-».",
+                    _kb([[_btn("🎲 Случайный HWID", f"rnd:{idx}")], [_btn("⬅️ Ключи", "keys")]]))
+        elif data.startswith("rnd:"):
+            idx = int(data[4:])
+            key = self.store.get(idx)
+            if key is not None:
+                key["hwid"] = _rand_hwid()
+                self.store.save()
+                self.awaiting.pop(chat_id, None)
+                asyncio.create_task(self._check(chat_id, idx, mid))
         elif data.startswith("sg:"):
             _, i_s, j_s = data.split(":")
             idx, j = int(i_s), int(j_s)
