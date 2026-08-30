@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from .engine import BurnSession
+from .hoster import summarize as hoster_summary
 from .loader import HAPP_UA, fetch_and_load, is_placeholder, outbounds_from_body
 from .provision import provision_agent
 from .report import fmt_bytes, plan_summary, units_to_bytes
@@ -435,6 +436,7 @@ class Bot:
         return _kb([
             [_btn("▶️ Запустить", f"run:{i}")],
             [_btn("🔍 Проверить", f"check:{i}"), _btn("🌍 Страна", f"geo:{i}")],
+            [_btn("🏢 Хостер", f"host:{i}")],
             [_btn("🆔 HWID", f"hwid:{i}"), _btn("🗑 Удалить", f"delask:{i}")],
             [_btn("⬅️ Ключи", "keys")],
         ])
@@ -907,6 +909,67 @@ class Bot:
         finally:
             self.busy = False
 
+    async def _hoster_menu(self, chat_id: int, idx: int, mid: Optional[int]) -> None:
+        """Кто хостит ноды: ASN и владелец сети по каждому адресу подписки."""
+        key = self.store.get(idx)
+        if not key:
+            if mid:
+                await self.tg.edit(chat_id, mid, self._keys_text(), self._keys_kb())
+            return
+        name = key.get("name", "key")
+        back = _kb([[_btn("⬅️ Назад", f"key:{idx}")]])
+        if mid:
+            await self.tg.edit(chat_id, mid,
+                               f"🏢 <b>{esc(_short(name, 40))}</b>\n\nСмотрю, чьи это сервера…",
+                               None)
+        loop = asyncio.get_event_loop()
+        try:
+            ob, _ua, _raw, _info = await loop.run_in_executor(
+                None, lambda: fetch_and_load(key["url"], ua=self.cfg["ua"],
+                                             hwid=(key.get("hwid") or self.cfg["hwid"]) or None))
+        except Exception as e:
+            if mid:
+                await self.tg.edit(chat_id, mid,
+                                   f"🏢 <b>{esc(_short(name, 40))}</b>\n\n⛔ Ошибка загрузки\n"
+                                   f"<code>{esc(str(e)[:120])}</code>", back)
+            return
+        ob = [o for o in ob if not _is_placeholder(o.get("tag"))]
+        if not ob:
+            if mid:
+                await self.tg.edit(chat_id, mid,
+                                   f"🏢 <b>{esc(_short(name, 40))}</b>\n\n"
+                                   "⛔ Подписка не отдала нод — смотреть нечего.", back)
+            return
+        try:
+            groups, unknown, resolved = await loop.run_in_executor(
+                None, lambda: hoster_summary(ob))
+        except Exception as e:
+            if mid:
+                await self.tg.edit(chat_id, mid,
+                                   f"🏢 <b>{esc(_short(name, 40))}</b>\n\n⛔ Не вышло опросить\n"
+                                   f"<code>{esc(str(e)[:120])}</code>", back)
+            return
+
+        lines = [f"🏢 <b>Хостеры</b>\n{esc(_short(name, 40))}", "",
+                 f"Нод — {len(ob)}, уникальных адресов — {resolved}", ""]
+        if not groups:
+            lines.append("Ничего определить не удалось.")
+        for g in groups:
+            share = round(100 * g["nodes"] / max(len(ob), 1))
+            cc = ", ".join(sorted(g["countries"])[:8])
+            lines.append(f"<b>{esc(g['org'])}</b>")
+            tail = f" · {esc(g['asn'])}" if g["asn"] else ""
+            lines.append(f"  {g['nodes']} нод ({share}%) · IP {len(g['ips'])}{tail}")
+            if cc:
+                lines.append(f"  {esc(cc)}")
+            if not g["hosting"]:
+                lines.append("  ⚠️ не похоже на датацентр")
+            lines.append("")
+        if unknown:
+            lines.append(f"Не опознано нод — {unknown}")
+        if mid:
+            await self.tg.edit(chat_id, mid, "\n".join(lines).strip(), back)
+
     async def _geo_menu(self, chat_id: int, idx: int, mid: Optional[int]) -> None:
         key = self.store.get(idx)
         if not key:
@@ -1178,6 +1241,8 @@ class Bot:
                 await self.tg.edit(chat_id, mid, self._srv_text(ai), self._srv_kb(ai))
         elif data.startswith("run:"):
             asyncio.create_task(self._run_indices(chat_id, [int(data[4:])], self._take_limit(), mid))
+        elif data.startswith("host:"):
+            asyncio.create_task(self._hoster_menu(chat_id, int(data[5:]), mid))
         elif data.startswith("geo:"):
             asyncio.create_task(self._geo_menu(chat_id, int(data[4:]), mid))
         elif data.startswith("hwid:"):
