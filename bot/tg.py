@@ -521,10 +521,12 @@ class Bot:
         if not sub_ob and _all_placeholders(raw):
             self._save_report(key, "заглушки/HWID", info, 0, "панель скрыла ноды")
             i = self.store.index_of(key["url"])
-            await put(f"🔒  {title}\n{SEP}\nпанель отдала только заглушки (3 попытки).\n"
-                      "реальные ноды скрыты — панель отдаёт их только\n"
-                      "настоящему Happ/Incy. Подробнее — 🔍 в Ключах.",
-                      _kb([[_btn("🆔 HWID", f"hwid:{i}")], [_btn("⬅️ Меню", "menu")]]))
+            await put(f"🔒  {title}\n{SEP}\nтолько заглушки (3 попытки). Подписка отдаёт ноды\n"
+                      "лишь настоящему Happ, лимит устройств забит.\n"
+                      "Обход: пришли боту ссылки vless:// из Happ.",
+                      _kb([[_btn("📥 Вставить ссылки vless://", "addkey")],
+                           [_btn("🧹 Стереть HWID", f"clrhw:{i}")],
+                           [_btn("⬅️ Меню", "menu")]]))
             return
         if not sub_ob:
             reason = self._deadreason(info, raw)
@@ -835,11 +837,15 @@ class Bot:
             self._save_report(key, "заглушки/HWID", info, prev, "панель скрыла ноды")
             names = "\n".join(f"• {_country_of(o.get('tag'))}" for o in raw[:4])
             msg = (f"🔒  {name}\n{SEP}\nтолько ЗАГЛУШКИ (после 3 попыток):\n{names}\n{SEP}\n"
-                   "устройство панель ДОБАВЛЯЕТ, но реальные ноды отдаёт\n"
-                   "только настоящему Happ/Incy — HWID это не обходит.\n"
-                   "«🎲» пробует другой HWID (может занять слот устройства).")
-            await out(msg, _kb([[_btn("🎲 Другой HWID", f"rnd:{idx}")],
-                                [_btn("🆔 Задать вручную", f"hwid:{idx}")],
+                   "Эта подписка отдаёт ноды ТОЛЬКО настоящему Happ.\n"
+                   "HWID не помогает, а попытки забивают лимит устройств\n"
+                   "(в панели «превышен лимит»). Ботом её не взять.\n"
+                   f"{SEP}\n"
+                   "✅ ОБХОД: пришли боту сами ссылки vless:// из Happ —\n"
+                   "заведётся «ручной ключ» без панели и HWID.\n"
+                   "🧹 и сотри HWID, чтобы не плодить устройства.")
+            await out(msg, _kb([[_btn("📥 Вставить ссылки vless://", "addkey")],
+                                [_btn("🧹 Стереть HWID", f"clrhw:{idx}")],
                                 [_btn("⬅️ Ключи", "keys")]]))
             return
         if outbounds:
@@ -1014,8 +1020,10 @@ class Bot:
                     "🎲 Случайный — бот сгенерит и попробует (сядет на\n"
                     "     свободный слот устройства, часто этого хватает).\n"
                     "или пришли свой HWID (тот же, что у подписки в Happ).\n"
-                    "стереть — пришли «-».",
-                    _kb([[_btn("🎲 Случайный HWID", f"rnd:{idx}")], [_btn("⬅️ Ключи", "keys")]]))
+                    "стереть — пришли «-» или кнопкой ниже.",
+                    _kb([[_btn("🎲 Случайный HWID", f"rnd:{idx}")],
+                         [_btn("🧹 Стереть HWID", f"clrhw:{idx}")],
+                         [_btn("⬅️ Ключи", "keys")]]))
         elif data.startswith("rnd:"):
             idx = int(data[4:])
             key = self.store.get(idx)
@@ -1024,6 +1032,17 @@ class Bot:
                 self.store.save()
                 self.awaiting.pop(chat_id, None)
                 asyncio.create_task(self._check(chat_id, idx, mid))
+        elif data.startswith("clrhw:"):
+            idx = int(data[6:])
+            key = self.store.get(idx)
+            if key is not None:
+                key["hwid"] = ""
+                self.store.save()
+                self.awaiting.pop(chat_id, None)
+            if mid:
+                await self.tg.edit(chat_id, mid,
+                                   "🧹 HWID стёрт — бот больше не будет плодить устройства\n"
+                                   "на этой панели.\n" + SEP + "\n" + self._keys_text(), self._keys_kb())
         elif data.startswith("sg:"):
             _, i_s, j_s = data.split(":")
             idx, j = int(i_s), int(j_s)
