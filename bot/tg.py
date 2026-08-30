@@ -217,17 +217,37 @@ class Bot:
             return None
 
     async def _key_load(self, key: dict):
-        loop = asyncio.get_event_loop()
         try:
-            ob, ua, raw, info = await loop.run_in_executor(
-                None, lambda: fetch_and_load(key["url"], ua=self.cfg["ua"],
-                                             hwid=(key.get("hwid") or self.cfg["hwid"]) or None)
-            )
+            ob, raw, info, ua = await self._fetch_nodes(key, tries=2, delay=3.0)
         except Exception:
             return [], 0, {}
         ob = _filter_geo(ob, key.get("country"))
         _, _, rem = plan_summary(info)
         return ob, rem, info
+
+    async def _fetch_nodes(self, key: dict, tries: int = 3, delay: float = 3.0, on_try=None):
+        """Тянет ноды подписки. Панель на первый запрос с новым HWID часто
+        регистрирует устройство и отдаёт заглушки, а реальный конфиг — на
+        следующий; поэтому повторяем тем же HWID (новый НЕ генерим)."""
+        loop = asyncio.get_event_loop()
+        hwid = (key.get("hwid") or self.cfg["hwid"]) or None
+        raw_last: List[dict] = []
+        info_last: Dict[str, int] = {}
+        ua_last = ""
+        for t in range(max(tries, 1)):
+            ob, ua, raw, info = await loop.run_in_executor(
+                None, lambda: fetch_and_load(key["url"], ua=self.cfg["ua"], hwid=hwid))
+            ua_last = ua
+            raw_last = raw or ob
+            info_last = info
+            real = [o for o in ob if not _is_placeholder(o.get("tag"))]
+            if real:
+                return real, raw_last, info_last, ua_last
+            if t < tries - 1:
+                if on_try:
+                    await on_try(t + 1, tries)
+                await asyncio.sleep(delay)
+        return [], raw_last, info_last, ua_last
 
     # ---------- views ----------
     def _menu_text(self) -> str:
@@ -454,7 +474,6 @@ class Bot:
     # ---------- burn until cutoff ----------
     async def _burn(self, chat_id: int, key: dict, limit_override: int, mid: Optional[int]) -> None:
         title = key.get("name", "key")
-        hwid = key.get("hwid") or self.cfg["hwid"]
 
         async def put(text: str, kb: Optional[dict]) -> None:
             nonlocal mid
@@ -466,16 +485,25 @@ class Bot:
                     mid = (r.get("result") or {}).get("message_id")
 
         await put(f"⏳  {title}\n{SEP}\nкачаю подписку…", None)
-        loop = asyncio.get_event_loop()
+
+        async def on_try(n: int, tot: int) -> None:
+            await put(f"⏳  {title}\n{SEP}\nжду реальные ноды от панели… {n + 1}/{tot}", None)
+
         try:
-            sub_ob, ua_used, raw, info = await loop.run_in_executor(
-                None, lambda: fetch_and_load(key["url"], ua=self.cfg["ua"], hwid=hwid or None)
-            )
+            sub_ob, raw, info, ua_used = await self._fetch_nodes(key, tries=3, delay=3.0, on_try=on_try)
         except Exception as e:
             self._save_report(key, "ошибка", {}, 0, str(e))
             await put(f"⛔  {title}\n{SEP}\nошибка загрузки: {e}", self._menu_kb())
             return
         total, used, remaining = plan_summary(info)
+        if not sub_ob and _all_placeholders(raw):
+            self._save_report(key, "заглушки/HWID", info, 0, "панель скрыла ноды")
+            i = self.store.index_of(key["url"])
+            await put(f"🔒  {title}\n{SEP}\nпанель отдала только заглушки (3 попытки).\n"
+                      "реальные ноды скрыты — панель отдаёт их только\n"
+                      "настоящему Happ/Incy. Подробнее — 🔍 в Ключах.",
+                      _kb([[_btn("🆔 HWID", f"hwid:{i}")], [_btn("⬅️ Меню", "menu")]]))
+            return
         if not sub_ob:
             reason = self._deadreason(info, raw)
             self._save_report(key, "мёртв/исчерпан", info, 0, reason)
@@ -509,9 +537,10 @@ class Bot:
 
         ok_agents = []
         run_flags: Dict[str, bool] = {}
+        agent_hwid = (key.get("hwid") or self.cfg["hwid"])
         for a in agents:
             res = await self._agent_call(a, "POST", "/burn", {
-                "url": key["url"], "hwid": hwid, "workers": self._workers(), "limit_bytes": limit})
+                "url": key["url"], "hwid": agent_hwid, "workers": self._workers(), "limit_bytes": limit})
             if res and res.get("ok"):
                 ok_agents.append(a)
                 run_flags[a["name"]] = True
@@ -767,26 +796,27 @@ class Bot:
             await out("нет такого ключа.", kbdone)
             return
         name = key.get("name", "key")
-        hwid = key.get("hwid") or self.cfg["hwid"]
         await out(f"🔍  {name}\n{SEP}\nпроверяю…", None)
-        loop = asyncio.get_event_loop()
+
+        async def on_try(n: int, tot: int) -> None:
+            await out(f"🔍  {name}\n{SEP}\nпанель добавила устройство, жду реальные\n"
+                      f"ноды… попытка {n + 1}/{tot}", None)
+
         try:
-            outbounds, ua_used, raw, info = await loop.run_in_executor(
-                None, lambda: fetch_and_load(key["url"], ua=self.cfg["ua"], hwid=hwid or None)
-            )
+            outbounds, raw, info, ua_used = await self._fetch_nodes(key, tries=3, delay=3.0, on_try=on_try)
         except Exception as e:
             await out(f"⛔  {name}\n{SEP}\nошибка: {e}", kbdone)
             return
         total, used, remaining = plan_summary(info)
         prev = key.get("report", {}).get("eaten", 0)
-        if _all_placeholders(outbounds):
+        if not outbounds and _all_placeholders(raw):
             self._save_report(key, "заглушки/HWID", info, prev, "панель скрыла ноды")
-            names = "\n".join(f"• {_country_of(o.get('tag'))}" for o in outbounds[:4])
-            msg = (f"🔒  {name}\n{SEP}\nпанель отдала только ЗАГЛУШКИ:\n{names}\n{SEP}\n"
-                   "реальные ноды скрыты — не принят HWID/клиент.\n"
-                   "нужен HWID устройства, зарегистрированного в ЭТОЙ\n"
-                   "панели (у ruvpn и midas — РАЗНЫЕ). Задай ниже:")
-            await out(msg, _kb([[_btn("🎲 Случайный HWID", f"rnd:{idx}")],
+            names = "\n".join(f"• {_country_of(o.get('tag'))}" for o in raw[:4])
+            msg = (f"🔒  {name}\n{SEP}\nтолько ЗАГЛУШКИ (после 3 попыток):\n{names}\n{SEP}\n"
+                   "устройство панель ДОБАВЛЯЕТ, но реальные ноды отдаёт\n"
+                   "только настоящему Happ/Incy — HWID это не обходит.\n"
+                   "«🎲» пробует другой HWID (может занять слот устройства).")
+            await out(msg, _kb([[_btn("🎲 Другой HWID", f"rnd:{idx}")],
                                 [_btn("🆔 Задать вручную", f"hwid:{idx}")],
                                 [_btn("⬅️ Ключи", "keys")]]))
             return
