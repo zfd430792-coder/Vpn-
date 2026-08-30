@@ -3,14 +3,19 @@ import shutil
 import subprocess
 
 
+LOG = "/tmp/vpn-selfupdate.log"
+
+
 def _update_cmd(install_dir: str, branch: str, service: str) -> str:
     pip = shlex.quote(f"{install_dir}/.venv/bin/pip")
+    d = shlex.quote(install_dir)
     return (
-        f"cd {shlex.quote(install_dir)} "
-        f"&& git fetch --depth 1 origin {shlex.quote(branch)} "
-        f"&& git reset --hard FETCH_HEAD "
-        f"&& ({pip} install -q -r requirements.txt || true) "
-        f"&& systemctl restart {shlex.quote(service)}"
+        f"exec >{LOG} 2>&1; set -x; echo start; "
+        f"cd {d} "
+        f"&& git fetch --depth 1 origin {shlex.quote(branch)} && echo fetched "
+        f"&& git reset --hard FETCH_HEAD && echo reset "
+        f"&& (timeout 120 {pip} install -q -r requirements.txt || echo pip-skip) "
+        f"&& echo restarting && systemctl restart {shlex.quote(service)}; echo done"
     )
 
 

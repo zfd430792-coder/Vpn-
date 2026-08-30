@@ -799,8 +799,15 @@ class Bot:
         await self._run_indices(chat_id, indices, self._take_limit(), mid)
 
     async def _do_update_bot(self, chat_id: int) -> None:
-        await self.tg.send(chat_id, "🔄 обновляюсь до последней версии, вернусь через ~1 мин…")
-        run_self_update(self.cfg["install_dir"], self.cfg["branch"], self.cfg["service"])
+        frm = local_head(self.cfg["install_dir"])[:7]
+        r = await self.tg.send(chat_id, "🔄 обновляюсь, перезапущусь через ~1 мин и напишу…")
+        newmid = (r.get("result") or {}).get("message_id") if isinstance(r, dict) else None
+        self.store.set_setting("pending_update", {"chat": chat_id, "mid": newmid, "from": frm})
+        ok = run_self_update(self.cfg["install_dir"], self.cfg["branch"], self.cfg["service"])
+        if not ok:
+            self.store.set_setting("pending_update", None)
+            await self.tg.send(chat_id, "⛔ не смог запустить обновление (нет systemd-run?). "
+                                        "Обнови вручную по SSH.", self._settings_kb())
 
     async def _do_update_agents(self, chat_id: int) -> int:
         ok = 0
@@ -1205,6 +1212,21 @@ async def main() -> None:
             raise SystemExit(f"getMe failed: {me}")
         print(f"bot up: @{me['result'].get('username')} | keys: {len(store.keys)} servers: {len(store.servers)}", flush=True)
         bot = Bot(tg, store, cfg)
+        pu = store.settings.get("pending_update")
+        if pu:
+            store.set_setting("pending_update", None)
+            cur = local_head(cfg["install_dir"])[:7]
+            if cur and pu.get("from") and cur != pu["from"]:
+                txt = f"✅ Обновление установлено.\n{pu['from']} → {cur}\nбот снова на связи."
+            else:
+                txt = f"♻️ Бот перезапущен (версия {cur or '?'}).\nверсия не изменилась — уже последняя?"
+            try:
+                if pu.get("mid"):
+                    await tg.edit(pu["chat"], pu["mid"], txt, bot._menu_kb())
+                else:
+                    await tg.send(pu["chat"], txt, bot._menu_kb())
+            except Exception:
+                pass
         asyncio.create_task(bot.update_watcher())
         offset = 0
         while True:
