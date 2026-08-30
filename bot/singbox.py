@@ -1,24 +1,49 @@
 import json
 import os
+import re
 import shutil
 import signal
 import socket
 import subprocess
 import tempfile
 import time
-from typing import Any, Dict, List, Optional
+from functools import lru_cache
+from typing import Any, Dict, List, Optional, Tuple
 
 
-def build_config(outbounds: List[Dict[str, Any]], socks_port: int, log_level: str = "warn") -> Dict[str, Any]:
+@lru_cache(maxsize=8)
+def singbox_version(binary: str) -> Tuple[int, int]:
+    """(major, minor) установленного sing-box; (0, 0) — определить не вышло."""
+    exe = shutil.which(binary) or binary
+    try:
+        out = subprocess.run([exe, "version"], capture_output=True, text=True,
+                             timeout=10).stdout
+    except Exception:
+        return (0, 0)
+    m = re.search(r"version\s+v?(\d+)\.(\d+)", out or "")
+    if not m:
+        return (0, 0)
+    return (int(m.group(1)), int(m.group(2)))
+
+
+def build_config(outbounds: List[Dict[str, Any]], socks_port: int,
+                 log_level: str = "warn",
+                 binary: Optional[str] = None) -> Dict[str, Any]:
     if not outbounds:
         raise ValueError("no outbounds")
     tags = [o["tag"] for o in outbounds]
     # Резолвим адрес ноды сначала в IPv4: на IPv4-only хостах AAAA даёт
     # "Network unreachable". prefer_ipv4 = пробуем A, при отсутствии — AAAA.
+    # С sing-box 1.12 domain_strategy внутри outbound'а объявлен legacy и
+    # роняет запуск ("legacy domain strategy options is deprecated"), поэтому
+    # там же настройка задаётся через route.default_domain_resolver.
+    ver = singbox_version(binary or os.environ.get("SINGBOX_BIN") or "sing-box")
+    modern = ver >= (1, 12) or ver == (0, 0)  # версию не узнали — считаем свежей
     real = []
     for o in outbounds:
         o = dict(o)
-        o.setdefault("domain_strategy", "prefer_ipv4")
+        if not modern:
+            o.setdefault("domain_strategy", "prefer_ipv4")
         real.append(o)
     # Отдельный вход на каждую ноду: порт (socks_port + i) жёстко ведёт в ноду i,
     # чтобы воркеры качали через все ноды сразу и их полосы складывались.
@@ -33,7 +58,7 @@ def build_config(outbounds: List[Dict[str, Any]], socks_port: int, log_level: st
             "listen_port": socks_port + i,
         })
         rules.append({"inbound": [itag], "outbound": tag})
-    return {
+    config: Dict[str, Any] = {
         "log": {"level": log_level},
         "inbounds": inbounds,
         "outbounds": [
@@ -59,6 +84,13 @@ def build_config(outbounds: List[Dict[str, Any]], socks_port: int, log_level: st
             "clash_api": {"external_controller": "127.0.0.1:9090"}
         },
     }
+    if modern:
+        config["dns"] = {"servers": [{"type": "local", "tag": "local"}]}
+        config["route"]["default_domain_resolver"] = {
+            "server": "local",
+            "strategy": "prefer_ipv4",
+        }
+    return config
 
 
 def wait_port(host: str, port: int, timeout: float = 15) -> None:

@@ -33,7 +33,7 @@ class BurnSession:
             raise RuntimeError("already running")
         if not outbounds:
             raise RuntimeError("no outbounds")
-        config = build_config(outbounds, socks_port=self.port)
+        config = build_config(outbounds, socks_port=self.port, binary=self.singbox_bin)
         self.box = SingBox(binary=self.singbox_bin)
         self.box.start(config, socks_port=self.port)
         self.counter = Counter()

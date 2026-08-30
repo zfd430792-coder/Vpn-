@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from .engine import BurnSession
-from .loader import fetch_and_load, outbounds_from_body
+from .loader import HAPP_UA, fetch_and_load, is_placeholder, outbounds_from_body
 from .provision import provision_agent
 from .report import fmt_bytes, plan_summary, units_to_bytes
 from .selfupdate import local_head, remote_head, run_self_update
@@ -124,26 +124,21 @@ def _filter_geo(outbounds: List[dict], sel: Optional[str]) -> List[dict]:
     return f or outbounds
 
 
-_PLACEHOLDER_MARKS = (
-    "не поддерж", "используйте", "используй", "unsupported", "not supported",
-    "use happ", "download", "скачив", "обновите", "update the app", "happ или",
-)
-
-
 def _is_placeholder(tag: str) -> bool:
-    t = str(tag or "").lower()
-    return any(m in t for m in _PLACEHOLDER_MARKS)
+    return is_placeholder(tag)
 
 
 def _all_placeholders(outbounds: List[dict]) -> bool:
     return bool(outbounds) and all(_is_placeholder(o.get("tag")) for o in outbounds)
 
 
-_HWID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
-
-
 def _rand_hwid() -> str:
-    return "".join(secrets.choice(_HWID_ALPHABET) for _ in range(16))
+    """Настоящий Happ шлёт HWID в виде UUID — повторяем формат."""
+    b = bytearray(secrets.token_bytes(16))
+    b[6] = (b[6] & 0x0F) | 0x40   # версия 4
+    b[8] = (b[8] & 0x3F) | 0x80   # вариант RFC 4122
+    h = b.hex()
+    return "%s-%s-%s-%s-%s" % (h[:8], h[8:12], h[12:16], h[16:20], h[20:])
 
 
 _NODE_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://", "hy2://", "hysteria2://", "tuic://")
@@ -674,11 +669,13 @@ class Bot:
             self._save_report(key, "заглушки/HWID", info, 0, "панель скрыла ноды")
             i = self.store.index_of(key["url"])
             await put(f"🔒 <b>{esc(_short(title, 40))}</b>\n\n"
-                      "Панель отдала только заглушки — реальные ноды скрыты, "
-                      "не принят HWID или клиент.\n\n"
-                      "Жми 🎲 — подберу HWID и перепроверю.",
-                      _kb([[_btn("🎲 Случайный HWID", f"rnd:{i}")],
-                           [_btn("🆔 Задать вручную", f"hwid:{i}")],
+                      "Панель отдала только заглушки — ноды скрыты для всех "
+                      "клиентов, кроме настоящего Happ.\n\n"
+                      "<b>Обход:</b> пришли ссылки <code>vless://</code> из Happ — "
+                      "заведётся ручной ключ, без панели и HWID.\n\n"
+                      "🎲 не поможет: каждый новый HWID занимает слот устройства.",
+                      _kb([[_btn("📥 Вставить ссылки vless://", "addkey")],
+                           [_btn("🆔 Задать HWID вручную", f"hwid:{i}")],
                            [_btn("⬅️ Меню", "menu")]]))
             return
         sub_ob = _filter_geo(sub_ob, key.get("country"))
@@ -988,8 +985,9 @@ class Bot:
             names = "\n".join(f"• {esc(_country_of(o.get('tag')))}" for o in raw[:4])
             msg = (f"🔒 <b>{esc(_short(name, 40))}</b>\n\n"
                    f"Только заглушки, 3 попытки подряд:\n{names}\n\n"
-                   "Подписка отдаёт ноды только настоящему Happ. HWID не "
-                   "помогает, а попытки забивают лимит устройств. "
+                   "Подписка отдаёт ноды только настоящему Happ. HWID ни при "
+                   "чём — заглушка приходит и на уже зарегистрированное "
+                   "устройство, а каждый новый HWID лишь занимает слот. "
                    "Ботом её не взять.\n\n"
                    "<b>Обход:</b> пришли сами ссылки <code>vless://</code> из Happ — "
                    "заведётся ручной ключ, без панели и HWID.")
@@ -1699,7 +1697,7 @@ async def main() -> None:
         "workers": int(os.environ.get("WORKERS", "64")),
         "port": int(os.environ.get("SOCKS_PORT", "10808")),
         "singbox_bin": os.environ.get("SINGBOX_BIN", "sing-box"),
-        "ua": os.environ.get("SUB_UA", "v2rayN/6.42"),
+        "ua": os.environ.get("SUB_UA") or HAPP_UA,
         "hwid": os.environ.get("SUB_HWID", ""),
         "default_limit": units_to_bytes(os.environ.get("DEFAULT_LIMIT", "0")),
         "branch": branch,

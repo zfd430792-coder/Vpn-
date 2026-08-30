@@ -1,4 +1,5 @@
 import base64
+import json
 from typing import Any, Dict, Optional, Tuple
 
 import requests
@@ -45,17 +46,39 @@ def _try_b64(payload: str) -> Optional[str]:
     return None
 
 
+def _is_xray_outbounds(obs: Any) -> bool:
+    """Xray-outbound опознаётся по ключу protocol; sing-box — по type."""
+    return any(isinstance(o, dict) and "protocol" in o for o in (obs or []))
+
+
 def parse(body: str) -> Dict[str, Any]:
     body = body.strip()
     decoded = _try_b64(body)
     if decoded is not None:
         body = decoded.strip()
     head = body[:2000]
+
+    # Happ отдаёт подписку массивом Xray-конфигов: [{"remarks":…,"outbounds":[…]}]
+    if body.startswith("["):
+        try:
+            data = json.loads(body)
+        except Exception:
+            data = None
+        if isinstance(data, list):
+            configs = [x for x in data if isinstance(x, dict) and "outbounds" in x]
+            if configs:
+                return {"kind": "xray", "configs": configs}
+
     if body.startswith("{") and '"outbounds"' in head:
-        import json
-        return {"kind": "singbox", "config": json.loads(body)}
+        conf = json.loads(body)
+        obs = conf.get("outbounds") or []
+        if _is_xray_outbounds(obs):
+            return {"kind": "xray", "configs": [conf]}
+        return {"kind": "singbox", "config": conf}
+
     if "proxies:" in head:
         conf = yaml.safe_load(body) or {}
         return {"kind": "clash", "proxies": conf.get("proxies", []) or []}
+
     uris = [line.strip() for line in body.splitlines() if "://" in line]
     return {"kind": "uris", "uris": uris}

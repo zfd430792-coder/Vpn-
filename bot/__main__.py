@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-from .loader import fetch_and_load, outbounds_from_body
+from .loader import HAPP_UA, fetch_and_load, outbounds_from_body
 from .report import fmt_bytes, plan_summary, progress, units_to_bytes
 from .singbox import SingBox, build_config
 from .traffic import BIG_FILES, Counter, burn
@@ -91,7 +91,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--limit", default="0", help="остановиться после N (100GB / 0 = остаток плана или без лимита)")
     p.add_argument("--interval", type=float, default=5.0, help="секунд между строками прогресса")
     p.add_argument("--files", default="", help="файл со списком URL для качания (по строке)")
-    p.add_argument("--ua", default=os.environ.get("SUB_UA", "v2rayN/6.42"),
+    p.add_argument("--ua", default=os.environ.get("SUB_UA") or HAPP_UA,
                    help="User-Agent, который пробуется первым (дальше перебор)")
     p.add_argument("--hwid", default=os.environ.get("SUB_HWID", ""),
                    help="HWID устройства для Happ (заголовок x-hwid)")

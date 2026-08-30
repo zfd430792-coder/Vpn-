@@ -348,3 +348,125 @@ def from_uris(uris: List[str]) -> List[Dict[str, Any]]:
 def from_clash_proxies(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     parsed = [ob for ob in (from_clash(n) for n in nodes) if ob]
     return dedupe_tags(parsed)
+
+
+def _xray_stream(ss: Dict[str, Any], host: str) -> Dict[str, Any]:
+    """streamSettings из Xray -> transport/tls во внутреннем (sing-box) виде."""
+    ss = ss or {}
+    out: Dict[str, Any] = {}
+    net = str(ss.get("network") or "tcp").lower()
+    if net == "ws":
+        w = ss.get("wsSettings") or {}
+        hdrs = w.get("headers") or {}
+        out["transport"] = {
+            "type": "ws",
+            "path": w.get("path", "/"),
+            "headers": {"Host": hdrs["Host"]} if hdrs.get("Host") else {},
+        }
+    elif net == "grpc":
+        g = ss.get("grpcSettings") or {}
+        out["transport"] = {"type": "grpc", "service_name": g.get("serviceName", "")}
+    elif net == "httpupgrade":
+        h = ss.get("httpupgradeSettings") or {}
+        out["transport"] = {
+            "type": "httpupgrade",
+            "path": h.get("path", "/"),
+            "host": h.get("host", ""),
+        }
+
+    sec = str(ss.get("security") or "none").lower()
+    if sec in ("tls", "xtls", "reality"):
+        src = (ss.get("realitySettings") if sec == "reality" else ss.get("tlsSettings")) or {}
+        tls: Dict[str, Any] = {
+            "enabled": True,
+            "server_name": src.get("serverName") or src.get("sni") or host,
+            "insecure": bool(src.get("allowInsecure")),
+        }
+        alpn = src.get("alpn")
+        if alpn:
+            tls["alpn"] = alpn if isinstance(alpn, list) else str(alpn).split(",")
+        if src.get("fingerprint"):
+            tls["utls"] = {"enabled": True, "fingerprint": src["fingerprint"]}
+        if sec == "reality":
+            tls["reality"] = {
+                "enabled": True,
+                "public_key": src.get("publicKey", ""),
+                "short_id": src.get("shortId", ""),
+            }
+        out["tls"] = tls
+    return out
+
+
+def from_xray_outbound(ob: Dict[str, Any], remarks: str = "") -> Optional[Dict[str, Any]]:
+    """Один outbound Xray/v2ray-JSON (формат Happ) -> внутренний вид."""
+    proto = str(ob.get("protocol") or "").lower()
+    st = ob.get("settings") or {}
+    name = remarks or str(ob.get("tag") or "")
+
+    if proto in ("vless", "vmess"):
+        vnext = st.get("vnext") or []
+        if not vnext:
+            return None
+        v = vnext[0]
+        users = v.get("users") or [{}]
+        u = users[0] if users else {}
+        host = v.get("address")
+        port = int(v.get("port") or 0)
+        out: Dict[str, Any] = {
+            "type": proto,
+            "tag": name or _tag(proto, str(host or ""), port),
+            "server": host,
+            "server_port": port,
+            "uuid": u.get("id", ""),
+        }
+        if proto == "vless":
+            if u.get("flow"):
+                out["flow"] = u["flow"]
+        else:
+            out["alter_id"] = int(u.get("alterId") or 0)
+            out["security"] = u.get("security") or "auto"
+        out.update(_xray_stream(ob.get("streamSettings") or {}, str(host or "")))
+        return out
+
+    if proto in ("trojan", "shadowsocks"):
+        servers = st.get("servers") or []
+        if not servers:
+            return None
+        s = servers[0]
+        host = s.get("address")
+        port = int(s.get("port") or 0)
+        if proto == "trojan":
+            out = {
+                "type": "trojan",
+                "tag": name or _tag("trojan", str(host or ""), port),
+                "server": host,
+                "server_port": port,
+                "password": s.get("password", ""),
+            }
+            out.update(_xray_stream(ob.get("streamSettings") or {}, str(host or "")))
+            return out
+        return {
+            "type": "shadowsocks",
+            "tag": name or _tag("ss", str(host or ""), port),
+            "server": host,
+            "server_port": port,
+            "method": s.get("method", ""),
+            "password": s.get("password", ""),
+        }
+    return None
+
+
+def from_xray_configs(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Массив Xray-конфигов (Happ отдаёт подписку именно так) -> outbound'ы."""
+    result: List[Dict[str, Any]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        remarks = str(item.get("remarks") or "")
+        for ob in item.get("outbounds") or []:
+            if not isinstance(ob, dict):
+                continue
+            conv = from_xray_outbound(ob, remarks)
+            if conv:
+                result.append(conv)
+    return dedupe_tags(result)
