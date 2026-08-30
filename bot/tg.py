@@ -137,6 +137,8 @@ class Bot:
         return int(w) if w else self.cfg["workers"]
 
     def _files(self) -> List[str]:
+        if self.store.settings.get("custom_only") and self.store.targets:
+            return list(self.store.targets)
         return list(BIG_FILES) + list(self.store.targets)
 
     def _take_limit(self) -> int:
@@ -190,6 +192,7 @@ class Bot:
             [_btn("▶️ Запустить всё", "run_all"), _btn("⏹ Остановить", "stop")],
             [_btn("🔑 Ключи", "keys"), _btn("🖥 Серверы", "servers")],
             [_btn("🎯 Источники", "targets"), _btn("📊 Статус", "status")],
+            [_btn("🔎 Проверить маршрут", "routechk")],
             [_btn("⚙️ Настройки", "settings")],
         ])
 
@@ -277,19 +280,31 @@ class Bot:
         return _kb(rows)
 
     def _targets_text(self) -> str:
+        co = bool(self.store.settings.get("custom_only"))
+        mode = "только свои" if (co and self.store.targets) else "встроенные + свои"
         out = ["🎯  ИСТОЧНИКИ (откуда качать)", SEP,
+               f"режим: {mode}",
                f"встроенных: {len(BIG_FILES)}  (Cloudflare, Hetzner, OVH, Tele2…)"]
         if self.store.targets:
             out.append("")
             out.append("твои:")
             for i, t in enumerate(self.store.targets, 1):
-                out.append(f"{i}.  {t}")
+                out.append(f"{i}.  {t[:48]}")
         else:
-            out.append("своих пока нет — можно добавить жирные файлы.")
+            out.append("своих пока нет.")
+        out.append(SEP)
+        out.append("⚠ «Умный» VPN (обход по городам) считает трафик")
+        out.append("ТОЛЬКО к ЗАБЛОКИРОВАННЫМ сайтам. Обычные CDN он")
+        out.append("пропускает бесплатно → квота не тратится.")
+        out.append("Чтобы жрать такую подписку: добавь сюда крупный файл")
+        out.append("с ресурса, который у тебя НЕ открывается без VPN")
+        out.append("(напр. archive.org), и включи «только свои».")
         return "\n".join(out)
 
     def _targets_kb(self) -> dict:
         rows = []
+        co = bool(self.store.settings.get("custom_only"))
+        rows.append([_btn(("✅" if co else "⬜️") + " только свои источники", "toggle_custom")])
         for i in range(len(self.store.targets)):
             rows.append([_btn(f"🗑 Удалить {i + 1}", f"tdel:{i}")])
         rows.append([_btn("➕ Добавить источник", "addtarget")])
@@ -710,12 +725,18 @@ class Bot:
             await self.tg.edit(chat_id, mid, self._servers_text(), self._servers_kb())
         elif data == "targets" and mid:
             await self.tg.edit(chat_id, mid, self._targets_text(), self._targets_kb())
+        elif data == "toggle_custom":
+            self.store.set_setting("custom_only", not self.store.settings.get("custom_only"))
+            if mid:
+                await self.tg.edit(chat_id, mid, self._targets_text(), self._targets_kb())
         elif data == "settings" and mid:
             await self.tg.edit(chat_id, mid, self._settings_text(), self._settings_kb())
         elif data == "status":
             kb = self._running_kb() if self.session.running() else self._status_kb()
             if mid:
                 await self.tg.edit(chat_id, mid, self._status_card(), kb)
+        elif data == "routechk":
+            asyncio.create_task(self._route_check(chat_id, mid))
         elif data == "run_all":
             asyncio.create_task(self._run_arg(chat_id, "all", mid))
         elif data == "dist_run":
@@ -800,6 +821,86 @@ class Bot:
                     break
             if mid:
                 await self.tg.edit(chat_id, mid, self._settings_text(), self._settings_kb())
+
+    async def _ip_via(self, port: Optional[int]) -> str:
+        urls = ["https://api.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com"]
+        for url in urls:
+            try:
+                if port is None:
+                    async with self.tg.session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                        if r.status == 200:
+                            return (await r.text()).strip()
+                    continue
+                from aiohttp_socks import ProxyConnector, ProxyType
+                conn = ProxyConnector(proxy_type=ProxyType.SOCKS5, host="127.0.0.1", port=port, rdns=True)
+                async with aiohttp.ClientSession(connector=conn) as s:
+                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                        if r.status == 200:
+                            return (await r.text()).strip()
+            except Exception:
+                continue
+        return ""
+
+    async def _route_check(self, chat_id: int, mid: Optional[int]) -> None:
+        kbback = _kb([[_btn("⬅️ Меню", "menu")]])
+
+        async def out(text: str, kb: Optional[dict]) -> None:
+            if mid:
+                await self.tg.edit(chat_id, mid, text, kb)
+            else:
+                await self.tg.send(chat_id, text, kb)
+
+        direct = await self._ip_via(None)
+        temp = None
+        if self.session.running() and self.session.node_count:
+            base, n = self.cfg["port"], self.session.node_count
+        else:
+            key = self.store.get(0)
+            if not key:
+                await out("🔎  ПРОВЕРКА МАРШРУТА\n" + SEP + "\nнет ключей. Добавь ключ и повтори.", kbback)
+                return
+            await out("🔎  ПРОВЕРКА МАРШРУТА\n" + SEP + "\nподнимаю ноды…", None)
+            loop = asyncio.get_event_loop()
+            try:
+                ob, _ua, _raw, _info = await loop.run_in_executor(
+                    None, lambda: fetch_and_load(key["url"], ua=self.cfg["ua"],
+                                                 hwid=(key.get("hwid") or self.cfg["hwid"]) or None))
+            except Exception as e:
+                await out(f"🔎  ПРОВЕРКА МАРШРУТА\n{SEP}\n⛔ ошибка загрузки: {e}", kbback)
+                return
+            if not ob:
+                await out(f"🔎  ПРОВЕРКА МАРШРУТА\n{SEP}\n⛔ подписка не отдала рабочих нод.", kbback)
+                return
+            from .singbox import SingBox, build_config
+            box = SingBox(self.cfg["singbox_bin"])
+            try:
+                box.start(build_config(ob, socks_port=self.cfg["port"]), socks_port=self.cfg["port"])
+            except Exception as e:
+                await out(f"🔎  ПРОВЕРКА МАРШРУТА\n{SEP}\n⛔ sing-box не стартовал: {e}", kbback)
+                return
+            base, n, temp = self.cfg["port"], len(ob), box
+        try:
+            lines = ["🔎  ПРОВЕРКА МАРШРУТА", SEP, f"🖥 IP сервера (напрямую): {direct or '—'}", SEP]
+            seen = []
+            for i in range(min(n, 8)):
+                ip = await self._ip_via(base + i)
+                seen.append(ip)
+                mark = "✅" if (ip and ip != direct) else ("⚠" if ip else "⛔")
+                lines.append(f"{mark} нода {i + 1}: {ip or 'нет ответа'}")
+            ok = any(ip and ip != direct for ip in seen)
+            lines.append(SEP)
+            if ok:
+                lines.append("✅ трафик РЕАЛЬНО идёт через подписку.")
+                lines.append("Если счётчик в приложении не растёт — у тебя")
+                lines.append("«умный» VPN: качай ЗАБЛОКИРОВАННЫЕ сайты")
+                lines.append("(🎯 Источники → «только свои»).")
+            else:
+                lines.append("⛔ трафик НЕ выходит через ноды.")
+                lines.append("Проверь sing-box и живость нод (🔍 в Ключах).")
+            await out("\n".join(lines), kbback)
+        finally:
+            if temp:
+                temp.stop()
 
     async def _ping(self, chat_id: int, idx: int) -> None:
         s = self.store.servers[idx] if 0 <= idx < len(self.store.servers) else None
