@@ -59,6 +59,32 @@ def _sz(v: float) -> str:
     return fmt_bytes(v).strip()
 
 
+def _country_of(tag: str) -> str:
+    t = str(tag or "").strip()
+    for sep in ("|", "—", "-", "·"):
+        if sep in t:
+            t = t.split(sep)[-1].strip()
+            break
+    return t or "нода"
+
+
+def _countries(outbounds: List[dict]) -> List[str]:
+    seen: List[str] = []
+    for o in outbounds:
+        c = _country_of(o.get("tag"))
+        if c not in seen:
+            seen.append(c)
+    return seen
+
+
+def _filter_geo(outbounds: List[dict], sel: Optional[str]) -> List[dict]:
+    if not sel:
+        return outbounds
+    low = sel.lower()
+    f = [o for o in outbounds if _country_of(o.get("tag")) == sel or low in str(o.get("tag", "")).lower()]
+    return f or outbounds
+
+
 def _btn(text: str, data: str) -> dict:
     return {"text": text, "callback_data": data}
 
@@ -131,6 +157,7 @@ class Bot:
         self.awaiting: Dict[int, str] = {}
         self.chats: Set[int] = set()
         self._notified_head = ""
+        self._geo_cache: Dict[int, List[str]] = {}
 
     def _workers(self) -> int:
         w = self.store.settings.get("workers")
@@ -171,6 +198,7 @@ class Bot:
             )
         except Exception:
             return [], 0, {}
+        ob = _filter_geo(ob, key.get("country"))
         _, _, rem = plan_summary(info)
         return ob, rem, info
 
@@ -202,7 +230,8 @@ class Bot:
                     "Пусто. Нажми «➕ Добавить ключ»\nили просто кинь ссылку на подписку.")
         out = ["🔑  КЛЮЧИ ПОДПИСОК", SEP]
         for i, k in enumerate(self.store.keys, 1):
-            out.append(f"{i}.  {k.get('name', 'key')}")
+            geo = k.get("country")
+            out.append(f"{i}.  {k.get('name', 'key')}   🌍 {geo if geo else 'авто'}")
             r = k.get("report") or {}
             if r:
                 st = r.get("status", "")
@@ -217,7 +246,7 @@ class Bot:
             else:
                 out.append("     ещё не запускался")
         out.append(SEP)
-        out.append("▶️ запуск · 🔍 проверка · 🗑 удалить")
+        out.append("▶️ запуск · 🌍 страна · 🔍 проверка · 🗑 удалить")
         return "\n".join(out)
 
     def _keys_kb(self) -> dict:
@@ -227,6 +256,7 @@ class Bot:
         for i in range(len(self.store.keys)):
             rows.append([
                 _btn(f"▶️ {i + 1}", f"run:{i}"),
+                _btn(f"🌍 {i + 1}", f"geo:{i}"),
                 _btn(f"🔍 {i + 1}", f"check:{i}"),
                 _btn(f"🗑 {i + 1}", f"del:{i}"),
             ])
@@ -418,6 +448,9 @@ class Bot:
             self._save_report(key, "мёртв/исчерпан", info, 0, reason)
             await put(f"⛔  {title}\n{SEP}\n{reason}", self._menu_kb())
             return
+        sub_ob = _filter_geo(sub_ob, key.get("country"))
+        if key.get("country"):
+            title = f"{title} · {key['country']}"
 
         limit = limit_override
         agents = list(self.store.servers)
@@ -637,6 +670,46 @@ class Bot:
         finally:
             self.busy = False
 
+    async def _geo_menu(self, chat_id: int, idx: int, mid: Optional[int]) -> None:
+        key = self.store.get(idx)
+        if not key:
+            if mid:
+                await self.tg.edit(chat_id, mid, self._keys_text(), self._keys_kb())
+            return
+        name = key.get("name", "key")
+        if mid:
+            await self.tg.edit(chat_id, mid, f"🌍  {name}\n{SEP}\nсмотрю доступные страны…", None)
+        loop = asyncio.get_event_loop()
+        try:
+            ob, _ua, _raw, _info = await loop.run_in_executor(
+                None, lambda: fetch_and_load(key["url"], ua=self.cfg["ua"],
+                                             hwid=(key.get("hwid") or self.cfg["hwid"]) or None))
+        except Exception as e:
+            if mid:
+                await self.tg.edit(chat_id, mid, f"🌍  {name}\n{SEP}\n⛔ ошибка загрузки: {e}",
+                                   _kb([[_btn("⬅️ Ключи", "keys")]]))
+            return
+        countries = _countries(ob)
+        cur = key.get("country")
+        if not countries:
+            if mid:
+                await self.tg.edit(chat_id, mid, f"🌍  {name}\n{SEP}\n⛔ подписка не отдала нод.",
+                                   _kb([[_btn("⬅️ Ключи", "keys")]]))
+            return
+        self._geo_cache[idx] = countries
+        text = [f"🌍  ВЫБОР СТРАНЫ · {name}", SEP,
+                f"нод в подписке: {len(ob)}",
+                f"сейчас: {cur if cur else 'авто (все страны)'}",
+                SEP, "выбери, через какую страну жрать:"]
+        rows = [[_btn(("• " if not cur else "") + "🎲 Авто (все)", f"sg:{idx}:-1")]]
+        for j, c in enumerate(countries):
+            n = sum(1 for o in ob if _country_of(o.get("tag")) == c)
+            mark = "• " if c == cur else ""
+            rows.append([_btn(f"{mark}{c}  ({n})", f"sg:{idx}:{j}")])
+        rows.append([_btn("⬅️ Ключи", "keys")])
+        if mid:
+            await self.tg.edit(chat_id, mid, "\n".join(text), _kb(rows))
+
     async def _check(self, chat_id: int, idx: int, mid: Optional[int]) -> None:
         kbdone = _kb([[_btn("⬅️ Ключи", "keys"), _btn("⬅️ Меню", "menu")]])
 
@@ -793,6 +866,18 @@ class Bot:
                 await self.tg.edit(chat_id, mid, self._servers_text(), self._servers_kb())
         elif data.startswith("run:"):
             asyncio.create_task(self._run_indices(chat_id, [int(data[4:])], self._take_limit(), mid))
+        elif data.startswith("geo:"):
+            asyncio.create_task(self._geo_menu(chat_id, int(data[4:]), mid))
+        elif data.startswith("sg:"):
+            _, i_s, j_s = data.split(":")
+            idx, j = int(i_s), int(j_s)
+            key = self.store.get(idx)
+            if key is not None:
+                clist = self._geo_cache.get(idx, [])
+                key["country"] = clist[j] if 0 <= j < len(clist) else None
+                self.store.save()
+            if mid:
+                await self.tg.edit(chat_id, mid, self._keys_text(), self._keys_kb())
         elif data.startswith("check:"):
             asyncio.create_task(self._check(chat_id, int(data[6:]), mid))
         elif data.startswith("del:"):

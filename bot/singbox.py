@@ -13,6 +13,13 @@ def build_config(outbounds: List[Dict[str, Any]], socks_port: int, log_level: st
     if not outbounds:
         raise ValueError("no outbounds")
     tags = [o["tag"] for o in outbounds]
+    # Резолвим адрес ноды сначала в IPv4: на IPv4-only хостах AAAA даёт
+    # "Network unreachable". prefer_ipv4 = пробуем A, при отсутствии — AAAA.
+    real = []
+    for o in outbounds:
+        o = dict(o)
+        o.setdefault("domain_strategy", "prefer_ipv4")
+        real.append(o)
     # Отдельный вход на каждую ноду: порт (socks_port + i) жёстко ведёт в ноду i,
     # чтобы воркеры качали через все ноды сразу и их полосы складывались.
     inbounds = []
@@ -44,7 +51,7 @@ def build_config(outbounds: List[Dict[str, Any]], socks_port: int, log_level: st
                 "outbounds": ["auto", *tags],
                 "default": "auto",
             },
-            *outbounds,
+            *real,
             {"type": "direct", "tag": "direct"},
         ],
         "route": {"rules": rules, "final": "auto"},
