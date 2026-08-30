@@ -85,6 +85,21 @@ def _filter_geo(outbounds: List[dict], sel: Optional[str]) -> List[dict]:
     return f or outbounds
 
 
+_PLACEHOLDER_MARKS = (
+    "не поддерж", "используйте", "используй", "unsupported", "not supported",
+    "use happ", "download", "скачив", "обновите", "update the app", "happ или",
+)
+
+
+def _is_placeholder(tag: str) -> bool:
+    t = str(tag or "").lower()
+    return any(m in t for m in _PLACEHOLDER_MARKS)
+
+
+def _all_placeholders(outbounds: List[dict]) -> bool:
+    return bool(outbounds) and all(_is_placeholder(o.get("tag")) for o in outbounds)
+
+
 def _btn(text: str, data: str) -> dict:
     return {"text": text, "callback_data": data}
 
@@ -236,7 +251,8 @@ class Bot:
         out = ["🔑  КЛЮЧИ ПОДПИСОК", SEP]
         for i, k in enumerate(self.store.keys, 1):
             geo = k.get("country")
-            out.append(f"{i}.  {k.get('name', 'key')}   🌍 {geo if geo else 'авто'}")
+            hw = "🆔✓" if k.get("hwid") else "🆔—"
+            out.append(f"{i}.  {k.get('name', 'key')}   🌍 {geo if geo else 'авто'}  {hw}")
             r = k.get("report") or {}
             if r:
                 st = r.get("status", "")
@@ -251,7 +267,7 @@ class Bot:
             else:
                 out.append("     ещё не запускался")
         out.append(SEP)
-        out.append("▶️ запуск · 🌍 страна · 🔍 проверка · 🗑 удалить")
+        out.append("▶️ запуск · 🌍 страна · 🆔 hwid · 🔍 проверка · 🗑")
         return "\n".join(out)
 
     def _keys_kb(self) -> dict:
@@ -262,6 +278,7 @@ class Bot:
             rows.append([
                 _btn(f"▶️ {i + 1}", f"run:{i}"),
                 _btn(f"🌍 {i + 1}", f"geo:{i}"),
+                _btn(f"🆔 {i + 1}", f"hwid:{i}"),
                 _btn(f"🔍 {i + 1}", f"check:{i}"),
                 _btn(f"🗑 {i + 1}", f"del:{i}"),
             ])
@@ -456,6 +473,14 @@ class Bot:
             reason = self._deadreason(info, raw)
             self._save_report(key, "мёртв/исчерпан", info, 0, reason)
             await put(f"⛔  {title}\n{SEP}\n{reason}", self._menu_kb())
+            return
+        if _all_placeholders(sub_ob):
+            self._save_report(key, "заглушки/HWID", info, 0, "панель скрыла ноды")
+            i = self.store.index_of(key["url"])
+            await put(f"🔒  {title}\n{SEP}\nпанель отдала только заглушки — реальные\n"
+                      "ноды скрыты. Не принят HWID/клиент. Задай HWID\n"
+                      "этой панели и повтори.",
+                      _kb([[_btn("🆔 Задать HWID", f"hwid:{i}")], [_btn("⬅️ Меню", "menu")]]))
             return
         sub_ob = _filter_geo(sub_ob, key.get("country"))
         if key.get("country"):
@@ -745,6 +770,15 @@ class Bot:
             return
         total, used, remaining = plan_summary(info)
         prev = key.get("report", {}).get("eaten", 0)
+        if _all_placeholders(outbounds):
+            self._save_report(key, "заглушки/HWID", info, prev, "панель скрыла ноды")
+            names = "\n".join(f"• {_country_of(o.get('tag'))}" for o in outbounds[:4])
+            msg = (f"🔒  {name}\n{SEP}\nпанель отдала только ЗАГЛУШКИ:\n{names}\n{SEP}\n"
+                   "реальные ноды скрыты — не принят HWID/клиент.\n"
+                   "нужен HWID устройства, зарегистрированного в ЭТОЙ\n"
+                   "панели (у ruvpn и midas — РАЗНЫЕ). Задай ниже:")
+            await out(msg, _kb([[_btn("🆔 Задать HWID", f"hwid:{idx}")], [_btn("⬅️ Ключи", "keys")]]))
+            return
         if outbounds:
             self._save_report(key, "жив", info, prev, "")
             lines = [f"✅  {name}", SEP, f"жив · нод: {len(outbounds)}", SEP]
@@ -901,6 +935,21 @@ class Bot:
             asyncio.create_task(self._run_indices(chat_id, [int(data[4:])], self._take_limit(), mid))
         elif data.startswith("geo:"):
             asyncio.create_task(self._geo_menu(chat_id, int(data[4:]), mid))
+        elif data.startswith("hwid:"):
+            idx = int(data[5:])
+            key = self.store.get(idx)
+            self.awaiting[chat_id] = f"hwid:{idx}"
+            cur = (key or {}).get("hwid") or "не задан"
+            if mid:
+                await self.tg.edit(
+                    chat_id, mid,
+                    f"🆔  HWID для «{(key or {}).get('name', '?')}»\n{SEP}\n"
+                    f"сейчас: {cur}\n{SEP}\n"
+                    "пришли HWID устройства, зарегистрированного в ЭТОЙ панели.\n"
+                    "где взять: в приложении Happ → та же подписка → её HWID,\n"
+                    "или в мини-приложении/панели провайдера в списке устройств.\n"
+                    "чтобы стереть — пришли «-».",
+                    _kb([[_btn("⬅️ Ключи", "keys")]]))
         elif data.startswith("sg:"):
             _, i_s, j_s = data.split(":")
             idx, j = int(i_s), int(j_s)
@@ -1079,6 +1128,19 @@ class Bot:
     async def dispatch(self, chat_id: int, text: str) -> None:
         self._remember(chat_id)
         aw = self.awaiting.pop(chat_id, None)
+        if aw and aw.startswith("hwid:"):
+            idx = int(aw.split(":")[1])
+            key = self.store.get(idx)
+            if not key:
+                await self.tg.send(chat_id, "ключа уже нет.", self._keys_kb())
+                return
+            val = text.strip().split()[0]
+            key["hwid"] = "" if val == "-" else val
+            self.store.save()
+            shown = key["hwid"] or "стёрт"
+            await self.tg.send(chat_id, f"✅ HWID для «{key.get('name', '?')}»: {shown}\nпроверяю…")
+            asyncio.create_task(self._check(chat_id, idx, None))
+            return
         if aw == "key":
             url = _extract_url(text)
             if not url:
