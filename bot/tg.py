@@ -155,9 +155,14 @@ class Bot:
         self._stop_all = False
         self.pending_limit = cfg["default_limit"]
         self.awaiting: Dict[int, str] = {}
-        self.chats: Set[int] = set()
+        self.chats: Set[int] = set(int(c) for c in (store.settings.get("chats") or []))
         self._notified_head = ""
         self._geo_cache: Dict[int, List[str]] = {}
+
+    def _remember(self, chat_id: int) -> None:
+        if chat_id not in self.chats:
+            self.chats.add(chat_id)
+            self.store.set_setting("chats", list(self.chats))
 
     def _workers(self) -> int:
         w = self.store.settings.get("workers")
@@ -344,6 +349,7 @@ class Bot:
     def _settings_text(self) -> str:
         lim = self.pending_limit
         lim_s = _sz(lim) if lim else "без лимита (до отключения)"
+        ver = local_head(self.cfg["install_dir"])[:7] or "?"
         return (
             "⚙️  НАСТРОЙКИ\n"
             f"{SEP}\n"
@@ -351,7 +357,9 @@ class Bot:
             "     больше = больше трафика (до потолка канала)\n"
             f"🎯 лимит запуска: {lim_s}\n"
             f"{SEP}\n"
-            "🔄 обновление — код тянется с GitHub сам"
+            f"📟 версия: {ver}\n"
+            "🔄 «Проверить обновления» — гляну GitHub и обновлю сам,\n"
+            "     на сервер заходить не надо"
         )
 
     def _settings_kb(self) -> dict:
@@ -364,7 +372,8 @@ class Bot:
             wrow,
             [_btn("── лимит ──", "settings")],
             lrow,
-            [_btn("🔄 Обновить бота", "update_bot"), _btn("🔄 Обновить всё", "update_all")],
+            [_btn("🔄 Проверить обновления", "chkupd")],
+            [_btn("⬆️ Обновить бота", "update_bot"), _btn("⬆️ Обновить всё", "update_all")],
             [_btn("⬅️ Меню", "menu")],
         ])
 
@@ -803,7 +812,7 @@ class Bot:
 
     # ---------- callbacks ----------
     async def on_callback(self, chat_id: int, mid: Optional[int], data: str, cb_id: str) -> None:
-        self.chats.add(chat_id)
+        self._remember(chat_id)
         await self.tg.answer(cb_id)
         if data == "menu" and mid:
             await self.tg.edit(chat_id, mid, self._menu_text(), self._menu_kb())
@@ -829,6 +838,8 @@ class Bot:
             asyncio.create_task(self._run_arg(chat_id, "all", mid))
         elif data == "dist_run":
             asyncio.create_task(self._run_distributed(chat_id, mid))
+        elif data == "chkupd":
+            asyncio.create_task(self._do_check_update(chat_id, mid))
         elif data == "update_bot":
             await self._do_update_bot(chat_id)
         elif data == "update_agents":
@@ -1015,24 +1026,51 @@ class Bot:
             await self.tg.send(chat_id, f"⛔ {s['name']} недоступен (IP/порт/firewall/токен)")
 
     # ---------- update watcher ----------
-    async def update_watcher(self) -> None:
+    async def _heads(self):
         loop = asyncio.get_event_loop()
+        loc = await loop.run_in_executor(None, lambda: local_head(self.cfg["install_dir"]))
+        rem = await loop.run_in_executor(None, lambda: remote_head(self.cfg["install_dir"], self.cfg["branch"]))
+        return loc, rem
+
+    async def update_watcher(self) -> None:
         while True:
-            await asyncio.sleep(1800)
+            await asyncio.sleep(300)
             try:
-                loc = await loop.run_in_executor(None, lambda: local_head(self.cfg["install_dir"]))
-                rem = await loop.run_in_executor(None, lambda: remote_head(self.cfg["install_dir"], self.cfg["branch"]))
+                loc, rem = await self._heads()
             except Exception:
                 continue
             if rem and loc and rem != loc and rem != self._notified_head and self.chats:
                 self._notified_head = rem
-                kb = _kb([[_btn("🔄 Обновить всё", "update_all")], [_btn("позже", "menu")]])
+                kb = _kb([[_btn("🔄 Обновить бота", "update_bot")], [_btn("позже", "menu")]])
                 for c in list(self.chats):
-                    await self.tg.send(c, "🔔 Доступно обновление бота.", kb)
+                    await self.tg.send(c, f"🔔 Доступна новая версия бота ({rem[:7]}).\nЖми — обновлю сам.", kb)
+
+    async def _do_check_update(self, chat_id: int, mid: Optional[int]) -> None:
+        async def out(text, kb):
+            if mid:
+                await self.tg.edit(chat_id, mid, text, kb)
+            else:
+                await self.tg.send(chat_id, text, kb)
+        await out("🔄  ПРОВЕРКА ОБНОВЛЕНИЙ\n" + SEP + "\nсмотрю GitHub…", None)
+        try:
+            loc, rem = await self._heads()
+        except Exception as e:
+            await out(f"🔄  ПРОВЕРКА ОБНОВЛЕНИЙ\n{SEP}\n⛔ ошибка: {e}", self._settings_kb())
+            return
+        if not rem:
+            await out(f"🔄  ПРОВЕРКА ОБНОВЛЕНИЙ\n{SEP}\n⛔ не достучался до GitHub "
+                      "(git/сеть на сервере?).", self._settings_kb())
+            return
+        if loc and rem == loc:
+            await out(f"✅  У ТЕБЯ ПОСЛЕДНЯЯ ВЕРСИЯ\n{SEP}\nкоммит {loc[:7]}", self._settings_kb())
+        else:
+            kb = _kb([[_btn("🔄 Обновить бота сейчас", "update_bot")], [_btn("⬅️ Настройки", "settings")]])
+            await out(f"🆕  ЕСТЬ ОБНОВЛЕНИЕ\n{SEP}\nу тебя:   {loc[:7] or '?'}\nна сервере: {rem[:7]}\n"
+                      f"{SEP}\nжми — обновлю сам, SSH не нужен.", kb)
 
     # ---------- messages ----------
     async def dispatch(self, chat_id: int, text: str) -> None:
-        self.chats.add(chat_id)
+        self._remember(chat_id)
         aw = self.awaiting.pop(chat_id, None)
         if aw == "key":
             url = _extract_url(text)
