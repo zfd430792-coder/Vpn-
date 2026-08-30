@@ -738,7 +738,22 @@ class Bot:
         prev = key.get("report", {}).get("eaten", 0)
         if outbounds:
             self._save_report(key, "жив", info, prev, "")
-            msg = f"✅  {name}\n{SEP}\nжив · нод: {len(outbounds)}"
+            lines = [f"✅  {name}", SEP, f"жив · нод: {len(outbounds)}", SEP]
+            v6 = 0
+            for o in outbounds[:8]:
+                srv = str(o.get("server", "?"))
+                port = o.get("server_port", "?")
+                is6 = srv.count(":") >= 2
+                if is6:
+                    v6 += 1
+                lines.append(f"• {_country_of(o.get('tag'))}: {srv}:{port}" + ("  ⚠IPv6" if is6 else ""))
+            if len(outbounds) > 8:
+                lines.append(f"…ещё {len(outbounds) - 8}")
+            if v6:
+                lines.append(SEP)
+                lines.append(f"⚠ {v6} нод только на IPv6 — на IPv4-сервере это")
+                lines.append("«Network unreachable». Нужен сервер с IPv6.")
+            msg = "\n".join(lines)
         else:
             reason = self._deadreason(info, raw)
             self._save_report(key, "мёртв/исчерпан", info, prev, reason)
