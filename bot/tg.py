@@ -1,6 +1,7 @@
 import asyncio
 import os
 import secrets
+import socket
 import time
 from typing import Dict, List, Optional, Set
 from urllib.parse import urlparse
@@ -117,6 +118,33 @@ def _looks_like_config(text: str) -> bool:
 
 def _is_http(url: str) -> bool:
     return (url or "").lower().startswith(("http://", "https://"))
+
+
+# хостеры, где ИСХОДЯЩИЙ трафик платный (оплата за ГБ сверх квоты)
+_METERED_HOSTS = (
+    "amazon", "aws", "ec2", "google", "gcp", "1e100", "microsoft", "azure",
+    "digitalocean", "vultr", "choopa", "the constant company", "linode", "akamai",
+    "oracle", "alibaba", "aliyun", "tencent", "huawei",
+)
+# хостеры с фиксом/безлимитом (или очень высокой квотой)
+_FLAT_HOSTS = (
+    "hetzner", "ovh", "contabo", "netcup", "leaseweb", "time4vps", "aeza", "vdsina",
+    "selectel", "firstvds", "firstbyte", "reg.ru", "regru", "timeweb", "fdcservers",
+    "servers.com", "melbicom", "melbikomas", "ihor", "hostkey", "pq hosting", "pqhosting",
+    "vdsina", "aeza", "cloudzy", "rackm", "datacamp",
+)
+
+
+def _traffic_verdict(blob: str):
+    b = (blob or "").lower()
+    if any(m in b for m in _METERED_HOSTS):
+        return ("⛔ ПЛАТНЫЙ трафик (оплата за ГБ)!",
+                "жор терабайтов = БОЛЬШОЙ счёт.\nпроверь тариф ПЕРЕД запуском.")
+    if any(f in b for f in _FLAT_HOSTS):
+        return ("✅ обычно фикс/безлимит",
+                "но глянь лимит (напр. Hetzner режет скорость после ~20 ТБ).")
+    return ("❓ хостер неизвестен",
+            "УТОЧНИ у хостера, платный ли исходящий трафик, ДО жора.")
 
 
 def _btn(text: str, data: str) -> dict:
@@ -289,7 +317,7 @@ class Bot:
             [_btn("▶️ Запустить всё", "run_all"), _btn("⏹ Остановить", "stop")],
             [_btn("🔑 Ключи", "keys"), _btn("🖥 Серверы", "servers")],
             [_btn("🎯 Источники", "targets"), _btn("📊 Статус", "status")],
-            [_btn("🔎 Проверить маршрут", "routechk")],
+            [_btn("🔎 Маршрут", "routechk"), _btn("🖧 Сервер", "server")],
             [_btn("⚙️ Настройки", "settings")],
         ])
 
@@ -944,6 +972,10 @@ class Bot:
                 await self.tg.edit(chat_id, mid, self._status_card(), kb)
         elif data == "routechk":
             asyncio.create_task(self._route_check(chat_id, mid))
+        elif data == "server":
+            asyncio.create_task(self._server_info(chat_id, mid))
+        elif data == "spdtest":
+            asyncio.create_task(self._speedtest(chat_id, mid))
         elif data == "run_all":
             asyncio.create_task(self._run_arg(chat_id, "all", mid))
         elif data == "dist_run":
@@ -1100,6 +1132,105 @@ class Bot:
             except Exception:
                 continue
         return ""
+
+    async def _geoip(self) -> Dict[str, str]:
+        try:
+            async with self.tg.session.get(
+                    "http://ip-api.com/json/?fields=status,country,city,isp,org,as,hosting,proxy,query",
+                    timeout=aiohttp.ClientTimeout(total=12)) as r:
+                j = await r.json(content_type=None)
+            if isinstance(j, dict) and j.get("status") == "success":
+                return {"ip": j.get("query", ""), "org": j.get("org", ""), "isp": j.get("isp", ""),
+                        "as": j.get("as", ""), "country": j.get("country", ""), "city": j.get("city", ""),
+                        "hosting": j.get("hosting")}
+        except Exception:
+            pass
+        try:
+            async with self.tg.session.get("https://ipwho.is/",
+                                           timeout=aiohttp.ClientTimeout(total=12)) as r:
+                j = await r.json(content_type=None)
+            if isinstance(j, dict) and j.get("success"):
+                conn = j.get("connection") or {}
+                return {"ip": j.get("ip", ""), "org": conn.get("org", ""), "isp": conn.get("isp", ""),
+                        "as": f"AS{conn.get('asn', '')} {conn.get('org', '')}".strip(),
+                        "country": j.get("country", ""), "city": j.get("city", ""), "hosting": None}
+        except Exception:
+            pass
+        return {}
+
+    async def _has_ipv6(self) -> bool:
+        loop = asyncio.get_event_loop()
+
+        def _probe() -> bool:
+            try:
+                s = socket.create_connection(("2606:4700:4700::1111", 443), timeout=5)
+                s.close()
+                return True
+            except Exception:
+                return False
+        try:
+            return await loop.run_in_executor(None, _probe)
+        except Exception:
+            return False
+
+    async def _server_info(self, chat_id: int, mid: Optional[int]) -> None:
+        kb = _kb([[_btn("⚡ Тест скорости канала", "spdtest")],
+                  [_btn("🔄 Обновить", "server"), _btn("⬅️ Меню", "menu")]])
+
+        async def out(text: str, k: Optional[dict]) -> None:
+            if mid:
+                await self.tg.edit(chat_id, mid, text, k)
+            else:
+                await self.tg.send(chat_id, text, k)
+
+        await out("🖧  СЕРВЕР\n" + SEP + "\nсобираю инфо…", None)
+        g = await self._geoip()
+        v6 = await self._has_ipv6()
+        if not g:
+            await out("🖧  СЕРВЕР\n" + SEP + "\n⛔ не смог узнать (нет сети / ip-api заблокирован).", kb)
+            return
+        blob = " ".join([g.get("org", ""), g.get("isp", ""), g.get("as", "")])
+        head, note = _traffic_verdict(blob)
+        host = g.get("org") or g.get("isp") or "?"
+        loc = ", ".join(x for x in [g.get("country", ""), g.get("city", "")] if x) or "?"
+        lines = ["🖧  СЕРВЕР", SEP,
+                 f"IP:      {g.get('ip', '?')}",
+                 f"хостер:  {host}",
+                 f"ASN:     {g.get('as', '?')}",
+                 f"локация: {loc}",
+                 f"IPv6:    {'есть ✅' if v6 else 'нет ❌'}",
+                 SEP, "💸 ТРАФИК:", head, note]
+        await out("\n".join(lines), kb)
+
+    async def _speedtest(self, chat_id: int, mid: Optional[int]) -> None:
+        kb = _kb([[_btn("🔄 Ещё раз", "spdtest"), _btn("🖧 Сервер", "server")], [_btn("⬅️ Меню", "menu")]])
+
+        async def out(text: str, k: Optional[dict]) -> None:
+            if mid:
+                await self.tg.edit(chat_id, mid, text, k)
+            else:
+                await self.tg.send(chat_id, text, k)
+
+        await out("⚡  ТЕСТ СКОРОСТИ\n" + SEP + "\nкачаю ~100 МБ напрямую…", None)
+        url = "https://speed.cloudflare.com/__down?bytes=104857600"
+        got = 0
+        t0 = time.monotonic()
+        try:
+            async with self.tg.session.get(url, timeout=aiohttp.ClientTimeout(total=40)) as r:
+                async for chunk in r.content.iter_chunked(1 << 20):
+                    got += len(chunk)
+                    if time.monotonic() - t0 > 15:
+                        break
+        except Exception as e:
+            await out(f"⚡  ТЕСТ СКОРОСТИ\n{SEP}\n⛔ не смог: {e}", kb)
+            return
+        dt = max(time.monotonic() - t0, 1e-6)
+        mbps = got * 8 / dt / 1e6
+        await out(f"⚡  СКОРОСТЬ КАНАЛА СЕРВЕРА\n{SEP}\n"
+                  f"скачал {_sz(got)} за {dt:.1f}с\n"
+                  f"≈ {mbps:.0f} Мбит/с  ({_sz(got / dt)}/s)\n{SEP}\n"
+                  "это прямой канал сервера (не через ноду).\n"
+                  "реальный жор упрётся в скорость ноды подписки.", kb)
 
     async def _route_check(self, chat_id: int, mid: Optional[int]) -> None:
         kbback = _kb([[_btn("⬅️ Меню", "menu")]])
