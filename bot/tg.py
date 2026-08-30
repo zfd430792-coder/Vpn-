@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from .engine import BurnSession
-from .loader import fetch_and_load
+from .loader import fetch_and_load, outbounds_from_body
 from .provision import provision_agent
 from .report import fmt_bytes, plan_summary, units_to_bytes
 from .selfupdate import local_head, remote_head, run_self_update
@@ -105,6 +105,18 @@ _HWID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 def _rand_hwid() -> str:
     return "".join(secrets.choice(_HWID_ALPHABET) for _ in range(16))
+
+
+_NODE_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://", "hy2://", "hysteria2://", "tuic://")
+
+
+def _looks_like_config(text: str) -> bool:
+    low = (text or "").lower()
+    return any(s in low for s in _NODE_SCHEMES)
+
+
+def _is_http(url: str) -> bool:
+    return (url or "").lower().startswith(("http://", "https://"))
 
 
 def _btn(text: str, data: str) -> dict:
@@ -226,10 +238,20 @@ class Bot:
         return ob, rem, info
 
     async def _fetch_nodes(self, key: dict, tries: int = 3, delay: float = 3.0, on_try=None):
-        """Тянет ноды подписки. Панель на первый запрос с новым HWID часто
+        """Тянет ноды. Если ключ — не URL, а сами ссылки (vless://…), парсим
+        их напрямую (без сети, без HWID — обход панели-стены).
+        Иначе тянем подписку: панель на первый запрос с новым HWID часто
         регистрирует устройство и отдаёт заглушки, а реальный конфиг — на
         следующий; поэтому повторяем тем же HWID (новый НЕ генерим)."""
         loop = asyncio.get_event_loop()
+        src = key.get("url", "")
+        if not _is_http(src):
+            try:
+                ob = await loop.run_in_executor(None, lambda: outbounds_from_body(src))
+            except Exception:
+                ob = []
+            real = [o for o in ob if not _is_placeholder(o.get("tag"))]
+            return real, real, {}, "manual"
         hwid = (key.get("hwid") or self.cfg["hwid"]) or None
         raw_last: List[dict] = []
         info_last: Dict[str, int] = {}
@@ -943,7 +965,10 @@ class Bot:
             self.awaiting[chat_id] = "key"
             if mid:
                 await self.tg.edit(chat_id, mid,
-                                   "🔑  Добавить ключ\n" + SEP + "\nпришли ссылку на подписку\n(можно через пробел hwid).",
+                                   "🔑  Добавить ключ\n" + SEP + "\n"
+                                   "• ссылку на подписку (можно через пробел hwid), ИЛИ\n"
+                                   "• сами ссылки vless:// / vmess:// (из Happ) —\n"
+                                   "  построчно; тогда панель и HWID не нужны.",
                                    _kb(BACK))
         elif data == "addtarget":
             self.awaiting[chat_id] = "target"
@@ -1191,10 +1216,14 @@ class Bot:
             asyncio.create_task(self._check(chat_id, idx, None))
             return
         if aw == "key":
+            if _looks_like_config(text) and not _extract_url(text):
+                await self._add_raw_key(chat_id, text)
+                return
             url = _extract_url(text)
             if not url:
                 self.awaiting[chat_id] = "key"
-                await self.tg.send(chat_id, "это не ссылка. пришли URL подписки.", _kb(BACK))
+                await self.tg.send(chat_id, "это не ссылка. пришли URL подписки или сами\n"
+                                            "ссылки vless:// (из приложения Happ).", _kb(BACK))
                 return
             hwid = ""
             for p in text.split():
@@ -1251,6 +1280,9 @@ class Bot:
             await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
             return
 
+        if _looks_like_config(text) and not _extract_url(text):
+            await self._add_raw_key(chat_id, text)
+            return
         url = _extract_url(text)
         if url:
             k = self.store.add(url, hwid="", name=default_name(url))
@@ -1260,6 +1292,24 @@ class Bot:
             asyncio.create_task(self._run_indices(chat_id, [idx], self._take_limit(), mid))
             return
         await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
+
+    async def _add_raw_key(self, chat_id: int, text: str) -> None:
+        self.awaiting.pop(chat_id, None)
+        loop = asyncio.get_event_loop()
+        try:
+            ob = await loop.run_in_executor(None, lambda: outbounds_from_body(text))
+        except Exception as e:
+            await self.tg.send(chat_id, f"⛔ не разобрал ссылки: {e}", _kb(BACK))
+            return
+        real = [o for o in ob if not _is_placeholder(o.get("tag"))]
+        if not real:
+            await self.tg.send(chat_id, "⛔ рабочих нод не нашёл. Пришли ссылки vless:// /\n"
+                                        "vmess:// / trojan:// — одной строкой или построчно.", _kb(BACK))
+            return
+        name = f"ручной · {len(real)} нод"
+        self.store.add(text, hwid="", name=name)
+        await self.tg.send(chat_id, f"✅ Ручной ключ добавлен: {len(real)} нод.\n"
+                                    "Панель/HWID тут ни при чём — жми ▶️ и жри.", self._keys_kb())
 
     # ---------- provision over SSH ----------
     async def _provision(self, chat_id: int, host: str, port: int, user: str, password: str) -> None:
