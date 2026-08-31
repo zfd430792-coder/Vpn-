@@ -8,6 +8,7 @@
 """
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -157,21 +158,25 @@ def main():
                 ctx.verify_mode = ssl.CERT_NONE
                 with socket.create_connection((host, port), timeout=8) as s:
                     with ctx.wrap_socket(s, server_hostname=sni) as ts:
-                        cert = ts.getpeercert(binary_form=False) or {}
-                        der = ts.getpeercert(binary_form=True)
-                        subj = dict(x[0] for x in cert.get("subject", ())) if cert else {}
-                        issuer = dict(x[0] for x in cert.get("issuer", ())) if cert else {}
+                        der = ts.getpeercert(binary_form=True) or b""
                         print(f"  TLS        : ✅ хендшейк прошёл, {ts.version()}")
-                        print(f"  сертификат : subject={subj.get('commonName', '?')} "
-                              f"issuer={issuer.get('organizationName') or issuer.get('commonName', '?')}")
-                        print(f"  размер cert: {len(der) if der else 0} байт")
-                        cn = str(subj.get("commonName", ""))
-                        if cn and sni and (cn.lstrip("*.") in sni or sni in cn):
-                            print("  ВЫВОД      : нода отдала НАСТОЯЩИЙ сертификат "
-                                  f"маскировочного домена → клиент не признан своим,"
-                                  " ключи из подписки не подходят к этой ноде")
+                        print(f"  размер cert: {len(der)} байт")
+                        # при CERT_NONE python не разбирает сертификат в словарь,
+                        # поэтому имена достаём прямо из DER
+                        names = sorted(set(
+                            m.decode() for m in re.findall(
+                                rb"[a-z0-9\*][a-z0-9\-\.\*]{3,}\.[a-z]{2,}", der.lower())
+                        ))
+                        shown = ", ".join(names[:6]) or "<имён не найдено>"
+                        print(f"  домены cert: {shown}")
+                        base = sni.split(".")[-2] if sni.count(".") >= 1 else sni
+                        if base and any(base in nm for nm in names):
+                            print("  ВЫВОД      : отдан НАСТОЯЩИЙ сертификат маскировочного")
+                            print("               домена → нода не признала клиента своим,")
+                            print("               ключи из подписки к ней не подходят")
                         else:
-                            print("  ВЫВОД      : сертификат не от маскировочного домена")
+                            print("  ВЫВОД      : сертификат НЕ от маскировочного домена —")
+                            print("               на этом IP отвечает не та нода (подмена/заглушка)")
             except Exception as e:
                 print(f"  TLS        : ❌ {type(e).__name__}: {e}")
         if checked > 3:
