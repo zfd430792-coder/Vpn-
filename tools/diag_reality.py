@@ -122,6 +122,60 @@ def main():
             print()
 
     print(f"всего reality-нод в подписке: {n}")
+
+    # ---- живость нод и чем они отвечают на 443 ----
+    # REALITY-нода, не признавшая клиента, молча проксирует на маскировочный
+    # домен и отдаёт ЕГО настоящий сертификат. Это отличает "ключи не подошли"
+    # от "нода недоступна".
+    import socket
+    import ssl
+    print("\n===== ПРОВЕРКА САМИХ НОД =====")
+    checked = 0
+    for item in parsed["configs"]:
+        for ob in item.get("outbounds") or []:
+            if not isinstance(ob, dict):
+                continue
+            ss = ob.get("streamSettings") or {}
+            if str(ss.get("security") or "").lower() != "reality":
+                continue
+            vnext = (ob.get("settings") or {}).get("vnext") or [{}]
+            host, port = vnext[0].get("address"), int(vnext[0].get("port") or 443)
+            sni = (ss.get("realitySettings") or {}).get("serverName") or ""
+            checked += 1
+            if checked > 3:
+                break
+            print(f"\n─ {host}:{port}  (SNI {sni})")
+            try:
+                with socket.create_connection((host, port), timeout=8):
+                    print("  TCP        : ✅ порт открыт")
+            except Exception as e:
+                print(f"  TCP        : ❌ {type(e).__name__}: {e}")
+                continue
+            try:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                with socket.create_connection((host, port), timeout=8) as s:
+                    with ctx.wrap_socket(s, server_hostname=sni) as ts:
+                        cert = ts.getpeercert(binary_form=False) or {}
+                        der = ts.getpeercert(binary_form=True)
+                        subj = dict(x[0] for x in cert.get("subject", ())) if cert else {}
+                        issuer = dict(x[0] for x in cert.get("issuer", ())) if cert else {}
+                        print(f"  TLS        : ✅ хендшейк прошёл, {ts.version()}")
+                        print(f"  сертификат : subject={subj.get('commonName', '?')} "
+                              f"issuer={issuer.get('organizationName') or issuer.get('commonName', '?')}")
+                        print(f"  размер cert: {len(der) if der else 0} байт")
+                        cn = str(subj.get("commonName", ""))
+                        if cn and sni and (cn.lstrip("*.") in sni or sni in cn):
+                            print("  ВЫВОД      : нода отдала НАСТОЯЩИЙ сертификат "
+                                  f"маскировочного домена → клиент не признан своим,"
+                                  " ключи из подписки не подходят к этой ноде")
+                        else:
+                            print("  ВЫВОД      : сертификат не от маскировочного домена")
+            except Exception as e:
+                print(f"  TLS        : ❌ {type(e).__name__}: {e}")
+        if checked > 3:
+            break
     if problems:
         print("\n НАЙДЕННЫЕ ПРОБЛЕМЫ:")
         for p in problems:
