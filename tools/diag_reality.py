@@ -53,11 +53,45 @@ def check_shortid(sid):
     return "✅ формат верный"
 
 
+def compare_with_link(link, sub_pbk, sub_sid):
+    """Сверить ключи из подписки с рабочей ссылкой vless:// из приложения."""
+    from bot.outbound import parse_uri
+    ob = parse_uri(link.strip())
+    if not ob:
+        print("не разобрал ссылку — она должна начинаться с vless://")
+        return
+    tls = ob.get("tls") or {}
+    r = tls.get("reality") or {}
+    pbk, sid = r.get("public_key", ""), r.get("short_id", "")
+    print("\n===== СВЕРКА С РАБОЧЕЙ ССЫЛКОЙ ИЗ ПРИЛОЖЕНИЯ =====")
+    print(f"  сервер в ссылке : {ob.get('server')}:{ob.get('server_port')}")
+    print(f"  SNI в ссылке    : {tls.get('server_name')}")
+    print(f"  publicKey ссылки: {mask(pbk)}")
+    print(f"  publicKey подписки: {mask(sub_pbk)}")
+    print(f"  shortId ссылки  : {sid!r}")
+    print(f"  shortId подписки: {sub_sid!r}")
+    print(f"  flow            : {ob.get('flow') or '<нет>'}")
+    same_pbk, same_sid = pbk == sub_pbk, sid == sub_sid
+    print()
+    if same_pbk and same_sid:
+        print("  ✅ КЛЮЧИ СОВПАДАЮТ — панель отдаёт боту то же, что приложению.")
+        print("     Значит дело не в ключах: смотри flow и transport выше.")
+    else:
+        if not same_pbk:
+            print("  ❌ publicKey РАЗНЫЙ")
+        if not same_sid:
+            print("  ❌ shortId РАЗНЫЙ")
+        print("     Панель отдаёт приложению одни ключи, а боту другие —")
+        print("     это панель-стена. Обход: скорми боту саму ссылку vless://.")
+
+
 def main():
     if len(sys.argv) < 2:
         print("нужен URL подписки первым аргументом")
+        print("для сверки:  diag_reality.py '<URL>' 'vless://…ссылка из Happ'")
         return 1
     url = sys.argv[1]
+    compare_link = sys.argv[2] if len(sys.argv) > 2 else ""
     hwid = os.environ.get("SUB_HWID", "") or None
 
     body = None
@@ -82,6 +116,7 @@ def main():
 
     n = 0
     problems = []
+    first_keys = {"pbk": "", "sid": ""}
     for item in parsed["configs"]:
         remarks = str(item.get("remarks") or "")
         for ob in item.get("outbounds") or []:
@@ -116,6 +151,9 @@ def main():
                   f"public_key={mask((ctls.get('reality') or {}).get('public_key'))}")
             print(f"  flow            : {conv.get('flow') or '<нет>'}")
 
+            if n == 1:
+                first_keys["pbk"] = (ctls.get("reality") or {}).get("public_key", "")
+                first_keys["sid"] = (ctls.get("reality") or {}).get("short_id", "")
             if ctls.get("server_name") == addr:
                 problems.append(f"нода {n}: SNI равен адресу ноды — для REALITY это провал верификации")
             if not (rs.get("publicKey") or ""):
@@ -123,6 +161,8 @@ def main():
             print()
 
     print(f"всего reality-нод в подписке: {n}")
+    if compare_link:
+        compare_with_link(compare_link, first_keys["pbk"], first_keys["sid"])
 
     # ---- живость нод и чем они отвечают на 443 ----
     # REALITY-нода, не признавшая клиента, молча проксирует на маскировочный
@@ -171,9 +211,11 @@ def main():
                         print(f"  домены cert: {shown}")
                         base = sni.split(".")[-2] if sni.count(".") >= 1 else sni
                         if base and any(base in nm for nm in names):
-                            print("  ВЫВОД      : отдан НАСТОЯЩИЙ сертификат маскировочного")
-                            print("               домена → нода не признала клиента своим,")
-                            print("               ключи из подписки к ней не подходят")
+                            print("  ВЫВОД      : нода ЖИВА и ведёт себя как исправная")
+                            print("               REALITY-нода — постороннему клиенту она")
+                            print("               отдаёт сертификат маскировочного домена.")
+                            print("               Проба шла БЕЗ ключей, поэтому о годности")
+                            print("               ключей это ничего не говорит.")
                         else:
                             print("  ВЫВОД      : сертификат НЕ от маскировочного домена —")
                             print("               на этом IP отвечает не та нода (подмена/заглушка)")
