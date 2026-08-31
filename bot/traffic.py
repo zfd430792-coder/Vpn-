@@ -124,11 +124,25 @@ async def probe_node(host: str, port: int, timeout: float = 8.0) -> bool:
         await writer.drain()
         if (await asyncio.wait_for(reader.readexactly(2), timeout))[:1] != b"\x05":
             return False
-        target = b"speed.cloudflare.com"
-        writer.write(b"\x05\x01\x00\x03" + bytes([len(target)]) + target + b"\x01\xbb")
+        target = b"speedtest.tele2.net"
+        writer.write(b"\x05\x01\x00\x03" + bytes([len(target)]) + target + b"\x00\x50")
         await writer.drain()
         resp = await asyncio.wait_for(reader.readexactly(4), timeout)
-        return resp[1] == 0
+        if resp[1] != 0:
+            return False
+        # Ответа прокси мало: некоторые клиенты подтверждают CONNECT сразу и
+        # соединяются с целью лениво. Убеждаемся, что данные реально идут.
+        atyp = resp[3]
+        skip = {1: 6, 4: 18}.get(atyp)
+        if skip is None:
+            ln = await asyncio.wait_for(reader.readexactly(1), timeout)
+            skip = ln[0] + 2
+        await asyncio.wait_for(reader.readexactly(skip), timeout)
+        writer.write(b"GET / HTTP/1.1\r\nHost: speedtest.tele2.net\r\n"
+                     b"User-Agent: curl/8\r\nConnection: close\r\n\r\n")
+        await writer.drain()
+        head = await asyncio.wait_for(reader.read(16), timeout)
+        return head.startswith(b"HTTP/")
     except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError):
         return False
     finally:

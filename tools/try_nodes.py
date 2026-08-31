@@ -31,8 +31,13 @@ SB = os.environ.get("SINGBOX_BIN", "/usr/local/bin/sing-box")
 PORT = 10999
 
 
-def socks_connect(port, host, dport, timeout=12):
-    """SOCKS5 CONNECT. Возвращает (ok, описание ответа прокси)."""
+def socks_connect(port, host, dport, timeout=12, fetch=True):
+    """SOCKS5 CONNECT и реальная прокачка данных.
+
+    Одного ответа прокси мало: Xray отвечает success сразу, а соединение с
+    целью устанавливает лениво, поэтому мёртвая нода выглядела бы живой.
+    Проверяем настоящим HTTP-запросом через туннель.
+    """
     codes = {0: "success", 1: "general SOCKS server failure", 2: "not allowed",
              3: "network unreachable", 4: "host unreachable",
              5: "connection refused", 6: "TTL expired"}
@@ -51,7 +56,27 @@ def socks_connect(port, host, dport, timeout=12):
         if len(resp) < 2:
             return False, "пустой ответ"
         code = resp[1]
-        return code == 0, codes.get(code, f"код {code}")
+        if code != 0:
+            return False, codes.get(code, f"код {code}")
+        if not fetch:
+            return True, "connect ok"
+        # дочитываем адрес привязки, чтобы не съесть его вместе с данными
+        atyp = resp[3] if len(resp) > 3 else 1
+        if atyp == 1:
+            s.recv(4 + 2)
+        elif atyp == 3:
+            ln = s.recv(1)
+            s.recv((ln[0] if ln else 0) + 2)
+        elif atyp == 4:
+            s.recv(16 + 2)
+        s.sendall(f"GET / HTTP/1.1\r\nHost: {host}\r\n"
+                  f"User-Agent: curl/8\r\nConnection: close\r\n\r\n".encode())
+        data = s.recv(64)
+        if not data:
+            return False, "туннель открылся, но данные не идут"
+        if not data.startswith(b"HTTP/"):
+            return False, f"мусор вместо ответа: {data[:24]!r}"
+        return True, f"прокачка ок ({data.split(chr(13).encode())[0].decode(errors='replace')[:24]})"
     except OSError as e:
         return False, f"{type(e).__name__}: {e}"
     finally:
@@ -92,7 +117,7 @@ def run_once(ob, fp, flow, logf):
                 time.sleep(0.2)
         else:
             return False, "порт не поднялся"
-        return socks_connect(PORT, "speed.cloudflare.com", 443)
+        return socks_connect(PORT, "speedtest.tele2.net", 80)
     finally:
         proc.terminate()
         try:
