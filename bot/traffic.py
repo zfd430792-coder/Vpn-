@@ -78,6 +78,10 @@ async def _worker(idx, counter, socks_host, socks_port, limit_bytes, files, stop
                         raise
                     except Exception as e:  # noqa: BLE001
                         counter.fail(f"{type(e).__name__}: {e}")
+                        # Когда прокси отказывает мгновенно (нода не поднялась),
+                        # пересоздание сессии без паузы превращается в busy-loop:
+                        # тысячи ошибок в секунду и сожжённый CPU без единого байта.
+                        await asyncio.sleep(0.5)
                         break
         except asyncio.CancelledError:
             raise

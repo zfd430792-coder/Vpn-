@@ -26,6 +26,9 @@ def singbox_version(binary: str) -> Tuple[int, int]:
     return (int(m.group(1)), int(m.group(2)))
 
 
+LOG_PATH = "/tmp/vpn-singbox.log"
+
+
 def build_config(outbounds: List[Dict[str, Any]], socks_port: int,
                  log_level: str = "warn",
                  binary: Optional[str] = None) -> Dict[str, Any]:
@@ -110,6 +113,8 @@ class SingBox:
         self.binary = resolved
         self.proc: Optional[subprocess.Popen] = None
         self.cfg_path: Optional[str] = None
+        self.log_path: Optional[str] = None
+        self.log_file = None
 
     def start(self, config: Dict[str, Any], socks_port: int) -> None:
         if not shutil.which(self.binary) and not os.path.isfile(self.binary):
@@ -123,9 +128,18 @@ class SingBox:
         with open(path, "w") as f:
             json.dump(config, f, indent=2)
         self.cfg_path = path
+        # Раньше вывод уходил в /dev/null, и настоящая причина отказов нод
+        # ("REALITY handshake failed", "dns: no such host", "network is
+        # unreachable") была не видна — наверх всплывал только обёрточный
+        # "General SOCKS server failure" от SOCKS-клиента. Пишем в файл.
+        self.log_path = LOG_PATH
+        try:
+            self.log_file = open(self.log_path, "w", encoding="utf-8", errors="replace")
+        except OSError:
+            self.log_file = None
         self.proc = subprocess.Popen(
             [self.binary, "run", "-c", path],
-            stdout=subprocess.DEVNULL,
+            stdout=self.log_file or subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
         )
         try:
@@ -133,6 +147,17 @@ class SingBox:
         except Exception:
             self.stop()
             raise
+
+    def tail_log(self, lines: int = 12) -> str:
+        """Последние строки лога sing-box — настоящая причина отказа нод."""
+        if not self.log_path:
+            return ""
+        try:
+            with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
+                rows = [r.rstrip() for r in f.readlines() if r.strip()]
+        except OSError:
+            return ""
+        return "\n".join(rows[-lines:])
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:
@@ -142,6 +167,12 @@ class SingBox:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
         self.proc = None
+        if self.log_file:
+            try:
+                self.log_file.close()
+            except OSError:
+                pass
+            self.log_file = None
         if self.cfg_path and os.path.exists(self.cfg_path):
             try:
                 os.unlink(self.cfg_path)

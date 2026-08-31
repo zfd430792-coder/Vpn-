@@ -602,6 +602,13 @@ class Bot:
         if eaten == 0 and s.counter.errors:
             lines += ["", f"⚠ Ошибок — {s.counter.errors}",
                       f"<code>{esc(s.counter.last_error[:60])}</code>"]
+            # "General SOCKS server failure" — обёртка SOCKS-клиента: она лишь
+            # говорит, что sing-box не смог выйти через ноду. Настоящая причина
+            # (REALITY handshake, DNS, unreachable) — в логе самого sing-box.
+            box_log = s.box.tail_log(6) if s.box else ""
+            if box_log:
+                lines += ["", "🔍 <b>sing-box пишет:</b>",
+                          f"<code>{esc(box_log[-600:])}</code>"]
         return "\n".join(lines)
 
     # ---------- reports ----------

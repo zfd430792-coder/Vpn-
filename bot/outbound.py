@@ -45,6 +45,20 @@ def from_vmess(uri: str) -> Dict[str, Any]:
     return ob
 
 
+# sing-box маскирует REALITY под uTLS-хендшейк: без блока utls рукопожатие
+# с нодой не проходит, и прокси отвечает "General SOCKS server failure".
+# Подписки часто fingerprint не присылают — подставляем безопасный дефолт.
+DEFAULT_UTLS_FINGERPRINT = "chrome"
+
+
+def _ensure_reality_utls(tls: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not tls or not (tls.get("reality") or {}).get("enabled"):
+        return tls
+    fp = (tls.get("utls") or {}).get("fingerprint")
+    tls["utls"] = {"enabled": True, "fingerprint": fp or DEFAULT_UTLS_FINGERPRINT}
+    return tls
+
+
 def _vless_or_trojan_tls(q: Dict[str, str], host: str) -> Optional[Dict[str, Any]]:
     security = q.get("security", "")
     if security not in ("tls", "reality", "xtls"):
@@ -64,7 +78,7 @@ def _vless_or_trojan_tls(q: Dict[str, str], host: str) -> Optional[Dict[str, Any
             "public_key": q.get("pbk", ""),
             "short_id": q.get("sid", ""),
         }
-    return tls
+    return _ensure_reality_utls(tls)
 
 
 def _transport(q: Dict[str, str]) -> Optional[Dict[str, Any]]:
@@ -306,7 +320,7 @@ def from_clash(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     "public_key": r.get("public-key", ""),
                     "short_id": r.get("short-id", ""),
                 }
-            ob["tls"] = tls
+            ob["tls"] = _ensure_reality_utls(tls)
         return ob
     if t in ("hysteria2", "hy2"):
         return {
@@ -393,7 +407,7 @@ def _xray_stream(ss: Dict[str, Any], host: str) -> Dict[str, Any]:
                 "public_key": src.get("publicKey", ""),
                 "short_id": src.get("shortId", ""),
             }
-        out["tls"] = tls
+        out["tls"] = _ensure_reality_utls(tls)
     return out
 
 
