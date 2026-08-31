@@ -85,6 +85,68 @@ def compare_with_link(link, sub_pbk, sub_sid):
         print("     это панель-стена. Обход: скорми боту саму ссылку vless://.")
 
 
+def keys_for(url, ua, hwid):
+    """Ключи первой reality-ноды при заданных UA и HWID."""
+    try:
+        body, _h = fetch_full(url, ua=ua, timeout=25, headers=happ_headers(hwid))
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+    try:
+        parsed = parse(body)
+    except Exception as e:
+        return None, f"разбор: {e}"
+    if parsed.get("kind") != "xray":
+        return None, f"формат {parsed.get('kind')}"
+    total = 0
+    first = None
+    for item in parsed["configs"]:
+        for ob in item.get("outbounds") or []:
+            if not isinstance(ob, dict):
+                continue
+            ss = ob.get("streamSettings") or {}
+            if str(ss.get("security") or "").lower() != "reality":
+                continue
+            total += 1
+            if first is None:
+                rs = ss.get("realitySettings") or {}
+                first = {"pbk": rs.get("publicKey", ""), "sid": rs.get("shortId", ""),
+                         "sni": rs.get("serverName", "")}
+    if first is None:
+        return None, "reality-нод нет"
+    first["count"] = total
+    first["bytes"] = len(body)
+    return first, ""
+
+
+def probe_hwid(url, cur_hwid):
+    """Отдаёт ли панель разные ключи разным устройствам."""
+    print("\n===== ОТВЕТ ПАНЕЛИ ПРИ РАЗНЫХ HWID =====")
+    print("(всего 2 запроса — лишние устройства на панели не плодим)\n")
+    variants = [("без HWID", None)]
+    if cur_hwid:
+        variants.append((f"HWID бота ({cur_hwid[:6]}…)", cur_hwid))
+    results = []
+    for label, hw in variants:
+        got, err = keys_for(url, "Happ/1.11.1", hw)
+        if not got:
+            print(f"  {label:26} → ошибка: {err}")
+            continue
+        print(f"  {label:26} → нод {got['count']:>3}, {got['bytes']} байт, "
+              f"pbk {mask(got['pbk'])}, sid {got['sid']!r}")
+        results.append((label, got))
+    if len(results) >= 2:
+        a, b = results[0][1], results[1][1]
+        print()
+        if a["pbk"] != b["pbk"] or a["sid"] != b["sid"]:
+            print("  ❗ Панель отдаёт РАЗНЫЕ ключи разным устройствам —")
+            print("     значит ключи привязаны к HWID. Нужен HWID того")
+            print("     устройства, на котором подписка реально работает.")
+        else:
+            print("  ✅ Ключи одинаковые независимо от HWID —")
+            print("     значит ключ общий и дело НЕ в привязке к устройству.")
+    return
+
+
 def main():
     if len(sys.argv) < 2:
         print("нужен URL подписки первым аргументом")
@@ -163,6 +225,7 @@ def main():
     print(f"всего reality-нод в подписке: {n}")
     if compare_link:
         compare_with_link(compare_link, first_keys["pbk"], first_keys["sid"])
+    probe_hwid(url, hwid)
 
     # ---- живость нод и чем они отвечают на 443 ----
     # REALITY-нода, не признавшая клиента, молча проксирует на маскировочный
