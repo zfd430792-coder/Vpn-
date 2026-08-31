@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from .report import fmt_bytes
 from .singbox import SingBox, build_config
-from .traffic import Counter, burn
+from .traffic import Counter, burn, probe_nodes
 
 
 class BurnSession:
@@ -23,6 +23,7 @@ class BurnSession:
         self.plan_used: int = 0
         self.auto_limit: bool = False
         self.title: str = ""
+        self.live_nodes: List[int] = []
 
     def running(self) -> bool:
         return self.burn_task is not None and not self.burn_task.done()
@@ -45,11 +46,21 @@ class BurnSession:
         self.title = title
         self.started_at = time.monotonic()
         self.node_count = len(outbounds)
+        # Предполётная проверка: жрать через мёртвые выходы бессмысленно —
+        # воркеры будут молотить отказы, а счётчик стоять на нуле.
+        self.live_nodes = await probe_nodes("127.0.0.1", self.port, self.node_count)
+        if not self.live_nodes:
+            self.box.stop()
+            self.box = None
+            raise RuntimeError(
+                f"ни одна из {self.node_count} нод не отвечает — "
+                "подписка нерабочая или ноды недоступны с этого сервера")
         self.burn_task = asyncio.create_task(
             burn("127.0.0.1", self.port, self.node_count, self.workers,
-                 limit_bytes, files, self.counter, self.stop_event)
+                 limit_bytes, files, self.counter, self.stop_event,
+                 live=self.live_nodes)
         )
-        return len(outbounds)
+        return len(self.live_nodes)
 
     def status(self) -> str:
         if not self.counter:
@@ -59,7 +70,8 @@ class BurnSession:
         rate = eaten / elapsed
         state = "🔥 жру трафик" if self.running() else "⏹ остановлен"
         head = state + (f" — {self.title}" if self.title else "")
-        lines = [head, f"🖧 выходов: {self.node_count}"]
+        live = len(self.live_nodes) or self.node_count
+        lines = [head, f"🖧 выходов: {live} из {self.node_count}"]
         if self.plan_total:
             used_now = self.plan_used + eaten
             left = max(self.plan_total - used_now, 0)

@@ -593,7 +593,8 @@ class Bot:
         lines = [head, "",
                  f"🍽 Съедено — {esc(_sz(eaten))}",
                  f"⚡ Скорость — {esc(_sz(eaten / elapsed))}/s",
-                 f"🖧 Выходов — {s.node_count} · воркеров {s.workers}",
+                 f"🖧 Выходов — {len(s.live_nodes) or s.node_count} из {s.node_count}"
+                 f" · воркеров {s.workers}",
                  f"⏱ Аптайм — {esc(_dur(elapsed))}"]
         if s.plan_total:
             lines.append(f"📦 План — {esc(_sz(s.plan_used + eaten))} / {esc(_sz(s.plan_total))}")
@@ -700,8 +701,11 @@ class Bot:
         except Exception as e:
             await self.session.stop()
             self._save_report(key, "ошибка старта", info, 0, str(e))
-            await put(f"⛔ <b>{esc(_short(title, 40))}</b>\n\nОшибка старта\n"
-                      f"<code>{esc(str(e)[:150])}</code>", self._menu_kb())
+            box_log = self.session.box.tail_log(5) if self.session.box else ""
+            msg = (f"⛔ <b>{esc(_short(title, 40))}</b>\n\n{esc(str(e)[:200])}")
+            if box_log:
+                msg += f"\n\n🔍 <b>sing-box пишет:</b>\n<code>{esc(box_log[-500:])}</code>"
+            await put(msg, self._menu_kb())
             return
 
         ok_agents = []

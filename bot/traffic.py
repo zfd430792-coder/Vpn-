@@ -108,6 +108,46 @@ async def _stall_monitor(counter: Counter, stop: asyncio.Event, stall_seconds: i
             return
 
 
+async def probe_node(host: str, port: int, timeout: float = 8.0) -> bool:
+    """Живой ли выход: SOCKS5 CONNECT через порт этой ноды.
+
+    sing-box поднимает отдельный inbound на каждую ноду, поэтому успешный
+    CONNECT на порт i означает, что туннель именно до ноды i собрался.
+    """
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout)
+    except (OSError, asyncio.TimeoutError):
+        return False
+    try:
+        writer.write(b"\x05\x01\x00")
+        await writer.drain()
+        if (await asyncio.wait_for(reader.readexactly(2), timeout))[:1] != b"\x05":
+            return False
+        target = b"speed.cloudflare.com"
+        writer.write(b"\x05\x01\x00\x03" + bytes([len(target)]) + target + b"\x01\xbb")
+        await writer.drain()
+        resp = await asyncio.wait_for(reader.readexactly(4), timeout)
+        return resp[1] == 0
+    except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError):
+        return False
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except (OSError, asyncio.TimeoutError):
+            pass
+
+
+async def probe_nodes(host: str, base_port: int, count: int,
+                      timeout: float = 8.0) -> List[int]:
+    """Индексы нод, через которые соединение реально устанавливается."""
+    results = await asyncio.gather(
+        *[probe_node(host, base_port + i, timeout) for i in range(count)],
+        return_exceptions=True)
+    return [i for i, ok in enumerate(results) if ok is True]
+
+
 def _parse_socks(socks_url: str):
     p = urlparse(socks_url)
     return (p.hostname or "127.0.0.1", p.port or 10808)
@@ -123,12 +163,16 @@ async def burn(
     counter: Counter,
     stop: Optional[asyncio.Event] = None,
     stall_seconds: int = STALL_SECONDS,
+    live: Optional[List[int]] = None,
 ) -> None:
     stop = stop or asyncio.Event()
     node_count = max(int(node_count), 1)
+    # live — индексы нод, прошедших предполётную проверку. Раскидываем воркеров
+    # только по ним, чтобы мёртвые выходы не съедали долю параллелизма.
+    ports = [base_port + i for i in (live if live else range(node_count))]
     tasks = [
         asyncio.create_task(
-            _worker(i, counter, socks_host, base_port + (i % node_count), limit_bytes, files, stop)
+            _worker(i, counter, socks_host, ports[i % len(ports)], limit_bytes, files, stop)
         )
         for i in range(workers)
     ]
