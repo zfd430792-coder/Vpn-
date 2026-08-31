@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from .report import fmt_bytes
 from .singbox import SingBox, build_config
-from .traffic import Counter, burn, probe_nodes
+from .traffic import WORKERS_PER_NODE, Counter, burn, probe_nodes
 
 
 class BurnSession:
@@ -24,6 +24,7 @@ class BurnSession:
         self.auto_limit: bool = False
         self.title: str = ""
         self.live_nodes: List[int] = []
+        self.effective_workers: int = 0
 
     def running(self) -> bool:
         return self.burn_task is not None and not self.burn_task.done()
@@ -55,8 +56,13 @@ class BurnSession:
             raise RuntimeError(
                 f"ни одна из {self.node_count} нод не отвечает — "
                 "подписка нерабочая или ноды недоступны с этого сервера")
+        # Воркеров ровно столько, сколько живые ноды способны переварить:
+        # выше потолка они не качают, а копят отказы.
+        self.effective_workers = max(
+            min(self.workers, len(self.live_nodes) * WORKERS_PER_NODE),
+            min(8, self.workers))
         self.burn_task = asyncio.create_task(
-            burn("127.0.0.1", self.port, self.node_count, self.workers,
+            burn("127.0.0.1", self.port, self.node_count, self.effective_workers,
                  limit_bytes, files, self.counter, self.stop_event,
                  live=self.live_nodes)
         )

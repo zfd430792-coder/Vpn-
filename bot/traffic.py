@@ -9,6 +9,11 @@ from aiohttp_socks import ProxyConnector, ProxyType
 
 
 CHUNK = 1 << 20  # 1 MiB
+# Ноды почти всегда лимитируют число одновременных сессий на один ключ, а вся
+# подписка выдаёт по одному uuid на ноду. Воркеры сверх этого потолка не
+# качают, а долбят отказами: греют CPU и злят панель. Держим осмысленный
+# потолок в пересчёте на живой выход.
+WORKERS_PER_NODE = 24
 STALL_SECONDS = 90  # нет трафика столько — считаем ноду отрезанной/мёртвой
 
 BIG_FILES: List[str] = [
@@ -32,6 +37,7 @@ class Counter:
         self.started = time.monotonic()
         self.errors = 0
         self.last_error = ""
+        self.active = 0  # сколько воркеров прямо сейчас качают, а не висят в отказе
 
     def add(self, n: int) -> None:
         self.bytes += n
@@ -67,13 +73,17 @@ async def _worker(idx, counter, socks_host, socks_port, limit_bytes, files, stop
                                 counter.fail(f"HTTP {resp.status}")
                                 await asyncio.sleep(0.2)
                                 continue
-                            async for chunk in resp.content.iter_chunked(CHUNK):
-                                counter.add(len(chunk))
-                                if stop.is_set():
-                                    return
-                                if limit_bytes and counter.bytes >= limit_bytes:
-                                    stop.set()
-                                    return
+                            counter.active += 1
+                            try:
+                                async for chunk in resp.content.iter_chunked(CHUNK):
+                                    counter.add(len(chunk))
+                                    if stop.is_set():
+                                        return
+                                    if limit_bytes and counter.bytes >= limit_bytes:
+                                        stop.set()
+                                        return
+                            finally:
+                                counter.active -= 1
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:  # noqa: BLE001

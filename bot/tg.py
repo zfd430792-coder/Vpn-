@@ -593,8 +593,11 @@ class Bot:
         lines = [head, "",
                  f"🍽 Съедено — {esc(_sz(eaten))}",
                  f"⚡ Скорость — {esc(_sz(eaten / elapsed))}/s",
-                 f"🖧 Выходов — {len(s.live_nodes) or s.node_count} из {s.node_count}"
-                 f" · воркеров {s.workers}",
+                 f"🖧 Выходов — {len(s.live_nodes) or s.node_count} из {s.node_count}",
+                 f"🧵 Воркеров — {s.effective_workers or s.workers}"
+                 + (f" из {s.workers}" if s.effective_workers and
+                    s.effective_workers < s.workers else "")
+                 + f" · качают {s.counter.active}",
                  f"⏱ Аптайм — {esc(_dur(elapsed))}"]
         if s.plan_total:
             lines.append(f"📦 План — {esc(_sz(s.plan_used + eaten))} / {esc(_sz(s.plan_total))}")
