@@ -1209,12 +1209,17 @@ class Bot:
             await self._do_update_bot(chat_id)
         elif data == "stop":
             self._stop_all = True
+            # мгновенный отклик: без него, пока идёт жор (self.busy), карточка
+            # обновилась бы только на следующем тике _live — до 15 с, и кнопка
+            # выглядела бы мёртвой ("я даже остановить не могу").
+            if mid:
+                ack = ("⏹ <b>Останавливаю…</b>\n\nСобираю итог." if self.busy
+                       else self._menu_text())
+                await self.tg.edit(chat_id, mid, ack, self._menu_kb())
             if self.session.running():
                 await self.session.stop()
             for a in list(self.store.servers):
                 await self._agent_call(a, "POST", "/stop")
-            if mid and not self.busy:
-                await self.tg.edit(chat_id, mid, self._menu_text(), self._menu_kb())
         elif data == "addkey":
             self.awaiting[chat_id] = "key"
             if mid:
