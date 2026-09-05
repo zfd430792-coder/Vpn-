@@ -1,6 +1,7 @@
 import asyncio
 import random
 import time
+from collections import deque
 from typing import List, Optional
 from urllib.parse import urlparse
 
@@ -38,6 +39,23 @@ class Counter:
         self.errors = 0
         self.last_error = ""
         self.active = 0  # сколько воркеров прямо сейчас качают, а не висят в отказе
+        # снимки (время, байты) для мгновенной скорости: средняя за всю сессию
+        # инерционна и маскирует то, что происходит прямо сейчас
+        self._hist = deque(maxlen=64)
+        self._hist.append((self.started, 0))
+
+    def sample(self) -> None:
+        self._hist.append((time.monotonic(), self.bytes))
+
+    def rate(self, window: float = 20.0) -> float:
+        """Скорость за последние window секунд (не среднюю за всю сессию)."""
+        now = time.monotonic()
+        for t, b in self._hist:
+            if now - t <= window:
+                if now - t >= 0.5:
+                    return (self.bytes - b) / (now - t)
+                break
+        return self.bytes / max(now - self.started, 1e-6)
 
     def add(self, n: int) -> None:
         self.bytes += n
@@ -52,12 +70,17 @@ def _bust(url: str) -> str:
     return f"{url}{sep}r={random.randint(0, 1_000_000_000)}"
 
 
-async def _worker(idx, counter, socks_host, socks_port, limit_bytes, files, stop):
+async def _worker(idx, counter, socks_host, pool, limit_bytes, files, stop):
     timeout = aiohttp.ClientTimeout(total=None, sock_read=60, sock_connect=20)
     while not stop.is_set():
         if limit_bytes and counter.bytes >= limit_bytes:
             stop.set()
             return
+        # порт берём заново каждый раз: список живых нод обновляется на ходу
+        socks_port = pool.pick(idx)
+        if socks_port is None:
+            await asyncio.sleep(2)
+            continue
         try:
             connector = ProxyConnector(proxy_type=ProxyType.SOCKS5, host=socks_host,
                                        port=socks_port, rdns=True)
@@ -100,15 +123,20 @@ async def _worker(idx, counter, socks_host, socks_port, limit_bytes, files, stop
             await asyncio.sleep(0.5)
 
 
-async def _stall_monitor(counter: Counter, stop: asyncio.Event, stall_seconds: int) -> None:
+async def _stall_monitor(counter: Counter, stop: asyncio.Event, stall_seconds: int,
+                         host: str = "127.0.0.1", base_port: int = 0,
+                         node_count: int = 0, pool: Optional["NodePool"] = None,
+                         recheck_every: float = 45.0) -> None:
     last = counter.bytes
     last_t = time.monotonic()
+    next_recheck = time.monotonic() + recheck_every
     while not stop.is_set():
         try:
             await asyncio.wait_for(stop.wait(), timeout=5)
             return
         except asyncio.TimeoutError:
             pass
+        counter.sample()
         cur = counter.bytes
         if cur > last:
             last = cur
@@ -116,6 +144,28 @@ async def _stall_monitor(counter: Counter, stop: asyncio.Event, stall_seconds: i
         elif time.monotonic() - last_t >= stall_seconds:
             stop.set()
             return
+        # Ноды отваливаются по ходу: без пересмотра воркеры продолжают долбить
+        # мёртвые выходы, и скорость проседает без видимой причины.
+        if pool is not None and node_count and time.monotonic() >= next_recheck:
+            next_recheck = time.monotonic() + recheck_every
+            try:
+                live = await probe_nodes(host, base_port, node_count, timeout=6.0)
+            except Exception:  # noqa: BLE001
+                live = []
+            if live:
+                pool.ports = [base_port + i for i in live]
+
+
+class NodePool:
+    """Живые выходы. Воркер берёт порт заново при каждом переподключении,
+    поэтому обновление списка на ходу само уводит их с умерших нод."""
+
+    def __init__(self, ports: List[int]) -> None:
+        self.ports = list(ports)
+
+    def pick(self, idx: int) -> Optional[int]:
+        ports = self.ports
+        return ports[idx % len(ports)] if ports else None
 
 
 async def probe_node(host: str, port: int, timeout: float = 8.0) -> bool:
@@ -193,14 +243,16 @@ async def burn(
     node_count = max(int(node_count), 1)
     # live — индексы нод, прошедших предполётную проверку. Раскидываем воркеров
     # только по ним, чтобы мёртвые выходы не съедали долю параллелизма.
-    ports = [base_port + i for i in (live if live else range(node_count))]
+    pool = NodePool([base_port + i for i in (live if live else range(node_count))])
     tasks = [
         asyncio.create_task(
-            _worker(i, counter, socks_host, ports[i % len(ports)], limit_bytes, files, stop)
+            _worker(i, counter, socks_host, pool, limit_bytes, files, stop)
         )
         for i in range(workers)
     ]
-    mon = asyncio.create_task(_stall_monitor(counter, stop, stall_seconds))
+    mon = asyncio.create_task(
+        _stall_monitor(counter, stop, stall_seconds, socks_host, base_port,
+                       node_count, pool))
     try:
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:

@@ -73,7 +73,7 @@ class BurnSession:
             return "💤 простаиваю."
         elapsed = max(time.monotonic() - self.started_at, 1e-6)
         eaten = self.counter.bytes
-        rate = eaten / elapsed
+        rate = self.counter.rate()
         state = "🔥 жру трафик" if self.running() else "⏹ остановлен"
         head = state + (f" — {self.title}" if self.title else "")
         live = len(self.live_nodes) or self.node_count

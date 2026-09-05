@@ -592,7 +592,8 @@ class Bot:
             head += f"\n{esc(_short(name, 40))}"
         lines = [head, "",
                  f"🍽 Съедено — {esc(_sz(eaten))}",
-                 f"⚡ Скорость — {esc(_sz(eaten / elapsed))}/s",
+                 f"⚡ Скорость — {esc(_sz(s.counter.rate()))}/s"
+                 f"  (в среднем {esc(_sz(eaten / elapsed))}/s)",
                  f"🖧 Выходов — {len(s.live_nodes) or s.node_count} из {s.node_count}",
                  f"🧵 Воркеров — {s.effective_workers or s.workers}"
                  + (f" из {s.workers}" if s.effective_workers and
