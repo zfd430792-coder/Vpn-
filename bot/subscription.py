@@ -1,5 +1,7 @@
 import base64
+import gzip
 import json
+import zlib
 from typing import Any, Dict, Optional, Tuple
 
 import requests
@@ -9,18 +11,72 @@ import yaml
 DEFAULT_UA = "v2rayN/6.42"
 
 
+def _decompress(raw: bytes, enc: str) -> bytes:
+    """Разжать тело подписки.
+
+    Кривые панели ставят Content-Encoding: gzip, а шлют не-gzip (или уже
+    plain/base64). requests верит заголовку и падает с
+    "incorrect header check". Поэтому берём СЫРЫЕ байты и пробуем разжать
+    сами: сначала по заявленной кодировке, затем по магическим байтам, а
+    если ничего не подошло — возвращаем как есть (это уже plain-текст).
+    """
+    if not raw:
+        return raw
+    enc = (enc or "").lower()
+
+    def _gz(b: bytes) -> bytes:
+        return gzip.decompress(b)
+
+    def _zlib_std(b: bytes) -> bytes:
+        return zlib.decompress(b)
+
+    def _deflate_raw(b: bytes) -> bytes:
+        return zlib.decompress(b, -zlib.MAX_WBITS)
+
+    def _brotli(b: bytes) -> bytes:
+        import brotli  # опционально: модуля может не быть
+        return brotli.decompress(b)
+
+    order = []
+    if "gzip" in enc or "x-gzip" in enc:
+        order += [_gz]
+    if "deflate" in enc:
+        order += [_zlib_std, _deflate_raw]
+    if "br" in enc:
+        order += [_brotli]
+    # заголовок мог соврать — доверяем магическим байтам тела
+    if raw[:2] == b"\x1f\x8b":
+        order += [_gz]
+    elif raw[:1] == b"\x78":  # zlib (0x78 0x01/0x9c/0xda)
+        order += [_zlib_std, _deflate_raw]
+
+    for fn in order:
+        try:
+            out = fn(raw)
+            if out:
+                return out
+        except Exception:
+            continue
+    return raw  # не сжато либо заголовок фальшивый — отдаём как пришло
+
+
 def fetch_full(
     url: str,
     ua: str = DEFAULT_UA,
     timeout: int = 20,
     headers: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, Dict[str, str]]:
-    h = {"User-Agent": ua, "Accept": "*/*"}
+    # Accept-Encoding: identity — просим сервер не жать вовсе. Если он всё
+    # равно сожмёт (или соврёт про кодировку), разожмём сами из сырых байт,
+    # поэтому resp.text (с авто-декодом requests) не трогаем.
+    h = {"User-Agent": ua, "Accept": "*/*", "Accept-Encoding": "identity"}
     if headers:
         h.update(headers)
-    resp = requests.get(url, headers=h, timeout=timeout)
+    resp = requests.get(url, headers=h, timeout=timeout, stream=True)
     resp.raise_for_status()
-    return resp.text.strip(), dict(resp.headers)
+    raw = resp.raw.read(decode_content=False)
+    body = _decompress(raw, resp.headers.get("Content-Encoding", ""))
+    return body.decode("utf-8", errors="replace").strip(), dict(resp.headers)
 
 
 def fetch(
