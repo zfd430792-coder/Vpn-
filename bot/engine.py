@@ -28,6 +28,7 @@ class BurnSession:
         self.auto_limit: bool = False
         self.title: str = ""
         self.live_nodes: List[int] = []
+        self.probe_blind: bool = False
         self.effective_workers: int = 0
         self.mode: str = "http"
         self.torrent: Optional[TorrentBurner] = None
@@ -55,13 +56,19 @@ class BurnSession:
         self.node_count = len(outbounds)
         # Предполётная проверка: жрать через мёртвые выходы бессмысленно —
         # воркеры будут молотить отказы, а счётчик стоять на нуле.
-        self.live_nodes = await probe_nodes("127.0.0.1", self.port, self.node_count)
-        if not self.live_nodes:
-            self.box.stop()
-            self.box = None
-            raise RuntimeError(
-                f"ни одна из {self.node_count} нод не отвечает — "
-                "подписка нерабочая или ноды недоступны с этого сервера")
+        full, conn = await probe_nodes("127.0.0.1", self.port, self.node_count)
+        # Проба помогает выбрать лучшие выходы, но не должна мешать запуску:
+        # цель проверки может быть недоступна именно через эту ноду, и живой
+        # выход попал бы в мёртвые. Поэтому запускаемся всегда, а вслепую —
+        # лишь когда не ответил вообще никто.
+        self.probe_blind = False
+        if full:
+            self.live_nodes = full
+        elif conn:
+            self.live_nodes = conn
+        else:
+            self.live_nodes = list(range(self.node_count))
+            self.probe_blind = True
         if self.mode == "torrent":
             # Торрент-сессия работает через один SOCKS-порт, поэтому берём
             # первый живой выход. Полосу даёт не число нод, а число пиров.

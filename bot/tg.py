@@ -642,7 +642,8 @@ class Bot:
                  f"🍽 Съедено — {esc(_sz(eaten))}",
                  f"⚡ Скорость — {esc(_sz(s.counter.rate()))}/s"
                  f"  (в среднем {esc(_sz(eaten / elapsed))}/s)",
-                 f"🖧 Выходов — {len(s.live_nodes) or s.node_count} из {s.node_count}",
+                 f"🖧 Выходов — {len(s.live_nodes) or s.node_count} из {s.node_count}"
+                 + (" (проба молчит, жру вслепую)" if s.probe_blind else ""),
                  f"🧵 Воркеров — {s.effective_workers or s.workers}"
                  + (f" из {s.workers}" if s.effective_workers and
                     s.effective_workers < s.workers else "")

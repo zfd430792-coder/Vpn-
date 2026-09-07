@@ -149,9 +149,10 @@ async def _stall_monitor(counter: Counter, stop: asyncio.Event, stall_seconds: i
         if pool is not None and node_count and time.monotonic() >= next_recheck:
             next_recheck = time.monotonic() + recheck_every
             try:
-                live = await probe_nodes(host, base_port, node_count, timeout=6.0)
+                full, conn = await probe_nodes(host, base_port, node_count, timeout=10.0)
             except Exception:  # noqa: BLE001
-                live = []
+                full, conn = [], []
+            live = full or conn
             if live:
                 pool.ports = [base_port + i for i in live]
 
@@ -168,12 +169,24 @@ class NodePool:
         return ports[idx % len(ports)] if ports else None
 
 
-async def probe_node(host: str, port: int, timeout: float = 8.0) -> bool:
-    """Живой ли выход: SOCKS5 CONNECT через порт этой ноды.
+# Цели для проверки ноды. Одной мало: конкретный хост может быть недоступен
+# именно через эту ноду, и живой выход ошибочно попадёт в мёртвые.
+PROBE_TARGETS = [
+    ("speedtest.tele2.net", 80),
+    ("ipv4.download.thinkbroadband.com", 80),
+    ("cachefly.cachefly.net", 80),
+    ("www.google.com", 80),
+]
+# Если ни одна цель не отдала данные, но соединение через ноду ставится —
+# это ещё не мёртвый выход, а лишь недоступные цели.
+CONNECT_TARGETS = [("www.google.com", 443), ("1.1.1.1", 443)]
 
-    sing-box поднимает отдельный inbound на каждую ноду, поэтому успешный
-    CONNECT на порт i означает, что туннель именно до ноды i собрался.
-    """
+PROBE_DEAD, PROBE_CONNECT, PROBE_FULL = 0, 1, 2
+
+
+async def _socks_try(host: str, port: int, target: str, tport: int,
+                     fetch: bool, timeout: float) -> bool:
+    """SOCKS5 CONNECT через ноду; при fetch — ещё и реальная прокачка."""
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), timeout=timeout)
@@ -184,22 +197,23 @@ async def probe_node(host: str, port: int, timeout: float = 8.0) -> bool:
         await writer.drain()
         if (await asyncio.wait_for(reader.readexactly(2), timeout))[:1] != b"\x05":
             return False
-        target = b"speedtest.tele2.net"
-        writer.write(b"\x05\x01\x00\x03" + bytes([len(target)]) + target + b"\x00\x50")
+        tb = target.encode()
+        writer.write(b"\x05\x01\x00\x03" + bytes([len(tb)]) + tb +
+                     tport.to_bytes(2, "big"))
         await writer.drain()
         resp = await asyncio.wait_for(reader.readexactly(4), timeout)
         if resp[1] != 0:
             return False
-        # Ответа прокси мало: некоторые клиенты подтверждают CONNECT сразу и
-        # соединяются с целью лениво. Убеждаемся, что данные реально идут.
+        if not fetch:
+            return True
         atyp = resp[3]
         skip = {1: 6, 4: 18}.get(atyp)
         if skip is None:
             ln = await asyncio.wait_for(reader.readexactly(1), timeout)
             skip = ln[0] + 2
         await asyncio.wait_for(reader.readexactly(skip), timeout)
-        writer.write(b"GET / HTTP/1.1\r\nHost: speedtest.tele2.net\r\n"
-                     b"User-Agent: curl/8\r\nConnection: close\r\n\r\n")
+        writer.write(f"GET / HTTP/1.1\r\nHost: {target}\r\n"
+                     f"User-Agent: curl/8\r\nConnection: close\r\n\r\n".encode())
         await writer.drain()
         head = await asyncio.wait_for(reader.read(16), timeout)
         return head.startswith(b"HTTP/")
@@ -213,13 +227,30 @@ async def probe_node(host: str, port: int, timeout: float = 8.0) -> bool:
             pass
 
 
+async def probe_node(host: str, port: int, timeout: float = 12.0) -> int:
+    """PROBE_FULL — данные идут, PROBE_CONNECT — только соединение, 0 — мертво."""
+    for target, tport in PROBE_TARGETS:
+        if await _socks_try(host, port, target, tport, True, timeout):
+            return PROBE_FULL
+    for target, tport in CONNECT_TARGETS:
+        if await _socks_try(host, port, target, tport, False, timeout):
+            return PROBE_CONNECT
+    return PROBE_DEAD
+
+
 async def probe_nodes(host: str, base_port: int, count: int,
-                      timeout: float = 8.0) -> List[int]:
-    """Индексы нод, через которые соединение реально устанавливается."""
+                      timeout: float = 12.0):
+    """(ноды с прокачкой, ноды хотя бы с соединением)."""
     results = await asyncio.gather(
         *[probe_node(host, base_port + i, timeout) for i in range(count)],
         return_exceptions=True)
-    return [i for i, ok in enumerate(results) if ok is True]
+    full, conn = [], []
+    for i, r in enumerate(results):
+        if r == PROBE_FULL:
+            full.append(i)
+        elif r == PROBE_CONNECT:
+            conn.append(i)
+    return full, conn
 
 
 def _parse_socks(socks_url: str):
