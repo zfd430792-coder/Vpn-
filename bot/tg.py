@@ -5,7 +5,7 @@ import secrets
 import socket
 import time
 from typing import Dict, List, Optional, Set
-from urllib.parse import urlparse
+from urllib.parse import unquote as up_unquote, urlparse
 
 import aiohttp
 
@@ -16,6 +16,7 @@ from .provision import provision_agent
 from .report import fmt_bytes, plan_summary, units_to_bytes
 from .selfupdate import local_head, remote_head, run_self_update
 from .store import KeyStore, default_name
+from .torrent import available as torrent_available
 from .traffic import BIG_FILES
 
 
@@ -50,6 +51,13 @@ def _short(s, n: int) -> str:
 
 
 _STATUS_ICON = {"жив": "✅", "мёртв/исчерпан": "⛔", "заглушки/HWID": "🔒"}
+
+
+MODE_LABEL = {"http": "🍽 качать файлы", "torrent": "🌀 торренты"}
+
+
+def _key_mode(key: dict) -> str:
+    return "torrent" if (key or {}).get("mode") == "torrent" else "http"
 
 
 def _key_icon(key: dict) -> str:
@@ -380,7 +388,8 @@ class Bot:
             [top],
             [_btn("🔑 Ключи", "keys"), _btn("🖥 Серверы", "servers")],
             [_btn("📊 Статус", "status"), _btn("🎯 Источники", "targets")],
-            [_btn("🩺 Диагностика", "diag"), _btn("⚙️ Настройки", "settings")],
+            [_btn("🌀 Раздачи", "magnets"), _btn("🩺 Диагностика", "diag")],
+            [_btn("⚙️ Настройки", "settings")],
         ])
 
     # ---- ключи ----
@@ -424,6 +433,7 @@ class Bot:
             lines.append(f"Съедено — {esc(_sz(r['eaten']))}")
         if r.get("total"):
             lines.append(f"План — {esc(_sz(r['used']))} / {esc(_sz(r['total']))}")
+        lines.append(f"Режим — {MODE_LABEL[_key_mode(k)]}")
         lines.append(f"Страна — {esc(k.get('country') or 'авто (все)')}")
         lines.append(f"HWID — {esc(k.get('hwid') or 'не задан')}")
         if r.get("ts"):
@@ -435,6 +445,8 @@ class Bot:
     def _key_kb(self, i: int) -> dict:
         return _kb([
             [_btn("▶️ Запустить", f"run:{i}")],
+            [_btn(f"🔀 Режим: {MODE_LABEL[_key_mode(self.store.get(i) or {})]}",
+                  f"mode:{i}")],
             [_btn("🔍 Проверить", f"check:{i}"), _btn("🌍 Страна", f"geo:{i}")],
             [_btn("🏢 Хостер", f"host:{i}")],
             [_btn("🆔 HWID", f"hwid:{i}"), _btn("🗑 Удалить", f"delask:{i}")],
@@ -528,6 +540,31 @@ class Bot:
                 "1. Добавь сюда прямую ссылку на крупный файл с ресурса, "
                 "который без VPN у тебя не открывается (например archive.org).\n"
                 "2. Включи «Только свои источники».")
+
+    # ---- торрент-раздачи ----
+    def _magnets_text(self) -> str:
+        out = ["🌀 <b>Раздачи</b>", ""]
+        if not torrent_available():
+            out += ["⚠️ Модуль libtorrent не установлен, торренты не запустятся.",
+                    "<code>pip install libtorrent</code> в venv бота и перезапуск.", ""]
+        if self.store.magnets:
+            for i, m in enumerate(self.store.magnets, 1):
+                name = m.split("dn=", 1)[1].split("&")[0] if "dn=" in m else m
+                out.append(f"<b>{i}.</b> {esc(_short(up_unquote(name), 44))}")
+        else:
+            out.append("Пока пусто — добавь magnet-ссылку.")
+        out += ["", "Торренты жрут ровнее HTTP: много пиров и нет единого "
+                    "рейт-лимитера, который режет одинокого качальщика.", "",
+                "Ссылки бери у легальных раздач: дистрибутивы Linux "
+                "(releases.ubuntu.com, cdimage.debian.org) или archive.org. "
+                "Скорость та же, а abuse-жалоб хостеру не будет."]
+        return "\n".join(out)
+
+    def _magnets_kb(self) -> dict:
+        rows = [[_btn(f"🗑 {i + 1}", f"mdel:{i}")] for i in range(len(self.store.magnets))]
+        rows.append([_btn("➕ Добавить magnet", "addmagnet")])
+        rows.append([_btn("⬅️ Меню", "menu")])
+        return _kb(rows)
 
     # ---- диагностика ----
     def _diag_text(self) -> str:
@@ -699,8 +736,24 @@ class Bot:
         limit = limit_override
         agents = list(self.store.servers)
         self.session.workers = self._workers()
+        # Режим ключа решает, ЧЕМ жрать: файлами по HTTP или торрентами.
+        mode = _key_mode(key)
+        self.session.mode = mode
+        if mode == "torrent":
+            if not torrent_available():
+                await put("⛔ <b>Торренты недоступны</b>\n\nНет модуля libtorrent.\n"
+                          "<code>pip install libtorrent</code> в venv бота "
+                          "и перезапусти.", self._menu_kb())
+                return
+            if not self.store.magnets:
+                await put("🌀 <b>Нет раздач</b>\n\nДобавь magnet-ссылку в разделе "
+                          "«Раздачи», иначе торрентам нечего качать.",
+                          _kb([[_btn("🌀 Раздачи", "magnets")], [_btn("⬅️ Меню", "menu")]]))
+                return
+            title = f"{title} · торренты"
+        payload = list(self.store.magnets) if mode == "torrent" else self._files()
         try:
-            await self.session.start(sub_ob, limit, self._files(), title=title,
+            await self.session.start(sub_ob, limit, payload, title=title,
                                      plan_total=total, plan_used=used, auto_limit=False)
         except Exception as e:
             await self.session.stop()
@@ -1164,6 +1217,30 @@ class Bot:
                 await self.tg.edit(chat_id, mid, self._targets_text(), self._targets_kb())
         elif data == "settings" and mid:
             await self.tg.edit(chat_id, mid, self._settings_text(), self._settings_kb())
+        elif data == "magnets" and mid:
+            await self.tg.edit(chat_id, mid, self._magnets_text(), self._magnets_kb())
+        elif data == "addmagnet":
+            self.awaiting[chat_id] = "magnet"
+            if mid:
+                await self.tg.edit(
+                    chat_id, mid,
+                    "🌀 <b>Добавить раздачу</b>\n\n"
+                    "Пришли magnet-ссылку (начинается с <code>magnet:?xt=</code>).\n\n"
+                    "Где взять легальные: releases.ubuntu.com, "
+                    "cdimage.debian.org, archive.org — там раздачи с сотнями "
+                    "сидов, канал забьют полностью.",
+                    _kb([[_btn("⬅️ Раздачи", "magnets")]]))
+        elif data.startswith("mdel:"):
+            self.store.remove_magnet(int(data[5:]))
+            if mid:
+                await self.tg.edit(chat_id, mid, self._magnets_text(), self._magnets_kb())
+        elif data.startswith("mode:") and mid:
+            i = int(data[5:])
+            k = self.store.get(i)
+            if k is not None:
+                k["mode"] = "http" if _key_mode(k) == "torrent" else "torrent"
+                self.store.save()
+            await self.tg.edit(chat_id, mid, self._key_text(i), self._key_kb(i))
         elif data == "diag" and mid:
             await self.tg.edit(chat_id, mid, self._diag_text(), self._diag_kb())
         elif data == "thelp" and mid:
@@ -1652,6 +1729,18 @@ class Bot:
             await self.tg.send(chat_id, f"✅ Ключ добавлен — {esc(_short(k['name'], 40))}",
                                self._keys_kb())
             return
+        if aw == "magnet":
+            uri = text.strip().split()[0] if text.strip() else ""
+            if not uri.startswith("magnet:?"):
+                self.awaiting[chat_id] = "magnet"
+                await self.tg.send(chat_id, "Это не magnet-ссылка. Она начинается "
+                                            "с <code>magnet:?xt=</code>.",
+                                   _kb([[_btn("⬅️ Раздачи", "magnets")]]))
+                return
+            added = self.store.add_magnet(uri)
+            await self.tg.send(chat_id, "✅ Раздача добавлена" if added else "Такая уже есть.",
+                               self._magnets_kb())
+            return
         if aw == "target":
             url = _extract_url(text)
             if not url:
@@ -1702,6 +1791,13 @@ class Bot:
             await self.tg.send(chat_id, self._menu_text(), self._menu_kb())
             return
 
+        if text.strip().startswith("magnet:?"):
+            uri = text.strip().split()[0]
+            added = self.store.add_magnet(uri)
+            await self.tg.send(chat_id,
+                               "✅ Раздача добавлена" if added else "Такая уже есть.",
+                               self._magnets_kb())
+            return
         if _looks_like_config(text) and not _extract_url(text):
             await self._add_raw_key(chat_id, text)
             return

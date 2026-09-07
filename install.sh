@@ -67,7 +67,11 @@ setup_venv() {
   msg "venv + зависимости"
   python3 -m venv "$INSTALL_DIR/.venv"
   "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip
-  "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+  # libtorrent нужен только торрент-режиму: если колесо под эту платформу
+  # не соберётся, бот всё равно поднимется и будет жрать по HTTP.
+  "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt" \
+    || "$INSTALL_DIR/.venv/bin/pip" install \
+         $(grep -v '^libtorrent' "$INSTALL_DIR/requirements.txt" | tr '\n' ' ')
 }
 write_env() {
   msg "пишу $ENV_DIR/env"

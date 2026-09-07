@@ -3,3 +3,4 @@ aiohttp-socks>=0.10
 PyYAML>=6.0
 requests>=2.31
 asyncssh>=2.14
+libtorrent>=2.0

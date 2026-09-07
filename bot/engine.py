@@ -1,17 +1,21 @@
 import asyncio
+import os
 import time
 from typing import List, Optional
 
 from .report import fmt_bytes
 from .singbox import SingBox, build_config
+from .torrent import TorrentBurner
 from .traffic import WORKERS_PER_NODE, Counter, burn, probe_nodes
 
 
 class BurnSession:
-    def __init__(self, workers: int, singbox_bin: str, port: int):
+    def __init__(self, workers: int, singbox_bin: str, port: int,
+                 data_dir: str = "/tmp/vpn-traffic-bot"):
         self.workers = workers
         self.singbox_bin = singbox_bin
         self.port = port
+        self.data_dir = data_dir
         self.box: Optional[SingBox] = None
         self.counter: Optional[Counter] = None
         self.stop_event: Optional[asyncio.Event] = None
@@ -25,6 +29,8 @@ class BurnSession:
         self.title: str = ""
         self.live_nodes: List[int] = []
         self.effective_workers: int = 0
+        self.mode: str = "http"
+        self.torrent: Optional[TorrentBurner] = None
 
     def running(self) -> bool:
         return self.burn_task is not None and not self.burn_task.done()
@@ -56,6 +62,16 @@ class BurnSession:
             raise RuntimeError(
                 f"ни одна из {self.node_count} нод не отвечает — "
                 "подписка нерабочая или ноды недоступны с этого сервера")
+        if self.mode == "torrent":
+            # Торрент-сессия работает через один SOCKS-порт, поэтому берём
+            # первый живой выход. Полосу даёт не число нод, а число пиров.
+            port = self.port + self.live_nodes[0]
+            self.torrent = TorrentBurner("127.0.0.1", port,
+                                         os.path.join(self.data_dir, "torrent"))
+            self.burn_task = asyncio.create_task(
+                self._run_torrent(limit_bytes, files))
+            return len(self.live_nodes)
+
         # Воркеров ровно столько, сколько живые ноды способны переварить:
         # выше потолка они не качают, а копят отказы.
         self.effective_workers = max(
@@ -67,6 +83,35 @@ class BurnSession:
                  live=self.live_nodes)
         )
         return len(self.live_nodes)
+
+    async def _run_torrent(self, limit_bytes: int, magnets: List[str]) -> None:
+        """Крутит торренты и переливает их счётчики в общий Counter,
+        чтобы статус, лимиты и стоп работали как для обычного жора."""
+        from .torrent import burn_torrents
+        loop = asyncio.get_event_loop()
+        sync = asyncio.create_task(self._sync_torrent())
+        try:
+            await burn_torrents(self.torrent, magnets, limit_bytes, self.stop_event)
+        finally:
+            sync.cancel()
+            try:
+                await sync
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    async def _sync_torrent(self) -> None:
+        while True:
+            await asyncio.sleep(2)
+            b = self.torrent
+            if not b or not self.counter:
+                continue
+            st = b.stats()
+            self.counter.bytes = st["bytes"]
+            self.counter.active = st["active"]
+            self.counter.errors = st["errors"]
+            if st["last_error"]:
+                self.counter.last_error = st["last_error"]
+            self.counter.sample()
 
     def status(self) -> str:
         if not self.counter:
@@ -107,6 +152,12 @@ class BurnSession:
                 await task
             except BaseException:
                 pass
+        if self.torrent:
+            try:
+                self.torrent.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self.torrent = None
         if self.box:
             self.box.stop()
             self.box = None

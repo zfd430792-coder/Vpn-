@@ -17,6 +17,7 @@ class KeyStore:
         self.path = path
         self.keys: List[Dict] = []
         self.targets: List[str] = []
+        self.magnets: List[str] = []
         self.servers: List[Dict] = []
         self.settings: Dict = {}
         self._lock = threading.Lock()
@@ -28,11 +29,13 @@ class KeyStore:
                 data = json.load(f)
             self.keys = data.get("keys", []) or []
             self.targets = data.get("targets", []) or []
+            self.magnets = data.get("magnets", []) or []
             self.servers = data.get("servers", []) or []
             self.settings = data.get("settings", {}) or {}
         except Exception:
             self.keys = []
             self.targets = []
+            self.magnets = []
             self.servers = []
             self.settings = {}
 
@@ -44,7 +47,8 @@ class KeyStore:
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(
                         {"keys": self.keys, "targets": self.targets,
-                         "servers": self.servers, "settings": self.settings},
+                         "magnets": self.magnets, "servers": self.servers,
+                         "settings": self.settings},
                         f, ensure_ascii=False, indent=2,
                     )
                 os.replace(tmp, self.path)
@@ -108,6 +112,22 @@ class KeyStore:
             t = self.targets.pop(idx)
             self.save()
             return t
+        return None
+
+    # ---- torrent sources ----
+    def add_magnet(self, uri: str) -> bool:
+        uri = uri.strip()
+        if uri in self.magnets:
+            return False
+        self.magnets.append(uri)
+        self.save()
+        return True
+
+    def remove_magnet(self, idx: int) -> Optional[str]:
+        if 0 <= idx < len(self.magnets):
+            m = self.magnets.pop(idx)
+            self.save()
+            return m
         return None
 
     # ---- agent servers ----
