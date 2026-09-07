@@ -35,6 +35,7 @@ class BurnSession:
         self.tstats: dict = {}
         self.torrent: Optional[TorrentBurner] = None
         self.torrent_node: Optional[int] = None
+        self.node_switches: int = 0
 
     def running(self) -> bool:
         return self.burn_task is not None and not self.burn_task.done()
@@ -119,13 +120,47 @@ class BurnSession:
         return None
 
     async def _run_torrent(self, limit_bytes: int, magnets: List[str]) -> None:
-        """Крутит торренты и переливает их счётчики в общий Counter,
-        чтобы статус, лимиты и стоп работали как для обычного жора."""
-        from .torrent import burn_torrents
-        loop = asyncio.get_event_loop()
+        """Крутит торренты и переливает их счётчики в общий Counter, чтобы
+        статус, лимиты и стоп работали как для обычного жора.
+
+        Нода может отвечать на SOCKS, но не пропускать пиров — тогда торрент
+        висит на ней без единого байта. Поэтому если за PEER_WAIT секунд ни
+        один пир не подключился, пробуем следующую ноду, и так по кругу.
+        """
+        from .torrent import TorrentBurner, burn_torrents
+        PEER_WAIT = 75
         sync = asyncio.create_task(self._sync_torrent())
         try:
-            await burn_torrents(self.torrent, magnets, limit_bytes, self.stop_event)
+            for attempt, idx in enumerate(self.live_nodes):
+                if self.stop_event.is_set():
+                    return
+                if attempt:  # первую ноду уже подобрали и запустили выше
+                    self.torrent_node = idx
+                    self.torrent = TorrentBurner(
+                        "127.0.0.1", self.port + idx,
+                        os.path.join(self.data_dir, "torrent"))
+                task = asyncio.create_task(
+                    burn_torrents(self.torrent, magnets, limit_bytes, self.stop_event))
+                started = time.monotonic()
+                while not task.done():
+                    await asyncio.sleep(3)
+                    if self.stop_event.is_set():
+                        break
+                    st = self.torrent.stats() if self.torrent else {}
+                    if st.get("peers") or st.get("bytes"):
+                        await task          # пиры пошли — работаем на этой ноде
+                        return
+                    if time.monotonic() - started > PEER_WAIT:
+                        self.node_switches += 1
+                        break               # глухо — пробуем следующую ноду
+                if task.done():
+                    await task
+                    return
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
         finally:
             sync.cancel()
             try:

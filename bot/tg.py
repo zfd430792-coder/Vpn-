@@ -644,6 +644,9 @@ class Bot:
         peers, given = t.get("peers", 0), t.get("tracker_peers", 0)
         node = getattr(s, "torrent_node", None)
         via = f" · через ноду #{node + 1}" if node is not None else ""
+        sw = getattr(s, "node_switches", 0)
+        if sw:
+            via += f" (сменено нод: {sw})"
         line = f"🌀 Раздач — {t.get('torrents', 0)} · подключено пиров {peers}{via}"
         state = t.get("state")
         if state:
