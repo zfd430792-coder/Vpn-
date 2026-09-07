@@ -6,7 +6,8 @@ from typing import List, Optional
 from .report import fmt_bytes
 from .singbox import SingBox, build_config
 from .torrent import TorrentBurner
-from .traffic import WORKERS_PER_NODE, Counter, burn, probe_nodes
+from .traffic import (PROBE_DEAD, WORKERS_PER_NODE, Counter, burn,
+                      probe_node, probe_nodes)
 
 
 class BurnSession:
@@ -33,6 +34,7 @@ class BurnSession:
         self.mode: str = "http"
         self.tstats: dict = {}
         self.torrent: Optional[TorrentBurner] = None
+        self.torrent_node: Optional[int] = None
 
     def running(self) -> bool:
         return self.burn_task is not None and not self.burn_task.done()
@@ -71,9 +73,21 @@ class BurnSession:
             self.live_nodes = list(range(self.node_count))
             self.probe_blind = True
         if self.mode == "torrent":
-            # Торрент-сессия работает через один SOCKS-порт, поэтому берём
-            # первый живой выход. Полосу даёт не число нод, а число пиров.
-            port = self.port + self.live_nodes[0]
+            # Торрент-сессия работает через ОДИН SOCKS-порт, и раньше сюда
+            # брался live_nodes[0] — просто первая нода списка. Если она
+            # мёртвая, торрент стоял намертво, хотя HTTP-режим на этой же
+            # подписке работал: там воркеры разложены по всем нодам и живые
+            # тянут за мёртвых. Поэтому ищем ноду, которая реально отвечает.
+            idx = await self._pick_torrent_node()
+            if idx is None:
+                self.box.stop()
+                self.box = None
+                raise RuntimeError(
+                    f"ни одна из {self.node_count} нод не принимает соединения — "
+                    "для торрентов нужна отвечающая нода, попробуй другую страну "
+                    "или запусти в режиме «качать файлы»")
+            self.torrent_node = idx
+            port = self.port + idx
             self.torrent = TorrentBurner("127.0.0.1", port,
                                          os.path.join(self.data_dir, "torrent"))
             self.burn_task = asyncio.create_task(
@@ -91,6 +105,18 @@ class BurnSession:
                  live=self.live_nodes)
         )
         return len(self.live_nodes)
+
+    async def _pick_torrent_node(self) -> Optional[int]:
+        """Первая нода, которая реально отвечает: торренту нужна именно
+        рабочая, запасных у одной сессии нет."""
+        for idx in self.live_nodes:
+            if await probe_node("127.0.0.1", self.port + idx, timeout=10.0) != PROBE_DEAD:
+                return idx
+        # Стучаться в localhost-порт бессмысленно: sing-box слушает его всегда,
+        # даже когда до ноды не достучаться. Признак живой ноды — успешный
+        # SOCKS CONNECT: он проходит, только если sing-box реально открыл
+        # соединение до неё.
+        return None
 
     async def _run_torrent(self, limit_bytes: int, magnets: List[str]) -> None:
         """Крутит торренты и переливает их счётчики в общий Counter,

@@ -642,7 +642,9 @@ class Bot:
         """В торрент-режиме воркеров нет — важны пиры и состояние раздачи."""
         t = getattr(s, "tstats", None) or {}
         peers, given = t.get("peers", 0), t.get("tracker_peers", 0)
-        line = f"🌀 Раздач — {t.get('torrents', 0)} · подключено пиров {peers}"
+        node = getattr(s, "torrent_node", None)
+        via = f" · через ноду #{node + 1}" if node is not None else ""
+        line = f"🌀 Раздач — {t.get('torrents', 0)} · подключено пиров {peers}{via}"
         state = t.get("state")
         if state:
             line += f"\n📥 Состояние — {esc(state)}"
