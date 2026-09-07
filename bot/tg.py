@@ -653,7 +653,15 @@ class Bot:
         elapsed = max(time.monotonic() - s.started_at, 1e-6)
         eaten = s.counter.bytes
         name = title or s.title
-        head = "🔥 <b>Жру трафик</b>" if s.running() else "⏹ <b>Остановлен</b>"
+        # Врать "жру трафик" при нулевом счётчике и мёртвых нодах нельзя:
+        # именно из-за этого причина простоя выглядела загадкой.
+        stuck = s.running() and eaten == 0 and elapsed > 45
+        if not s.running():
+            head = "⏹ <b>Остановлен</b>"
+        elif stuck:
+            head = "⚠️ <b>Трафик не идёт</b>"
+        else:
+            head = "🔥 <b>Жру трафик</b>"
         if name:
             head += f"\n{esc(_short(name, 40))}"
         lines = [head, "",
@@ -678,10 +686,13 @@ class Bot:
             # "General SOCKS server failure" — обёртка SOCKS-клиента: она лишь
             # говорит, что sing-box не смог выйти через ноду. Настоящая причина
             # (REALITY handshake, DNS, unreachable) — в логе самого sing-box.
-            box_log = s.box.tail_log(6) if s.box else ""
+            reason = s.box.failure_summary() if s.box else ""
+            if reason:
+                lines += ["", f"⛔ <b>Причина</b> — {esc(reason)}"]
+            box_log = s.box.tail_log(4) if s.box else ""
             if box_log:
                 lines += ["", "🔍 <b>sing-box пишет:</b>",
-                          f"<code>{esc(box_log[-600:])}</code>"]
+                          f"<code>{esc(box_log[-400:])}</code>"]
         return "\n".join(lines)
 
     # ---------- reports ----------

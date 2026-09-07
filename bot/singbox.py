@@ -148,6 +148,35 @@ class SingBox:
             self.stop()
             raise
 
+    # Из лога sing-box вытаскиваем суть: сырые строки с ANSI-кодами и
+    # идентификаторами соединений читать невозможно, а причина в них одна и
+    # та же на десятки строк.
+    _REASONS = (
+        ("i/o timeout", "нода не отвечает (таймаут соединения)"),
+        ("connection refused", "нода отвергла соединение"),
+        ("reality verification failed", "нода не приняла ключи (REALITY)"),
+        ("no such host", "домен ноды не разрешается"),
+        ("NXDOMAIN", "домен ноды не разрешается"),
+        ("network is unreachable", "сеть недоступна (нода только на IPv6?)"),
+        ("context deadline exceeded", "нода не ответила вовремя"),
+    )
+
+    def failure_summary(self) -> str:
+        """Человеческая причина отказа нод, если она одна на весь лог."""
+        log = self.tail_log(60)
+        if not log:
+            return ""
+        found = []
+        for needle, human in self._REASONS:
+            if needle.lower() in log.lower() and human not in found:
+                found.append(human)
+        if not found:
+            return ""
+        # адрес ноды, до которой не достучались
+        m = re.search(r"dial tcp ([0-9a-fA-F:.\[\]]+:\d+)", log)
+        where = f" — {m.group(1)}" if m else ""
+        return found[0] + where
+
     def tail_log(self, lines: int = 12) -> str:
         """Последние строки лога sing-box — настоящая причина отказа нод."""
         if not self.log_path:
