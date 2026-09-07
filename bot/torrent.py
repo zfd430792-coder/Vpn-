@@ -85,6 +85,11 @@ class TorrentBurner:
             "alert_mask": (lt.alert.category_t.error_notification
                            | lt.alert.category_t.tracker_notification
                            | lt.alert.category_t.status_notification),
+            # Через SOCKS входящих соединений не будет: слушать порт незачем,
+            # а анонс с локальных интерфейсов только плодит ошибки.
+            "listen_interfaces": "127.0.0.1:0",
+            "announce_to_all_trackers": True,
+            "announce_to_all_tiers": True,
             "connections_limit": 800,
             "active_downloads": -1,
             "active_limit": -1,
@@ -173,14 +178,21 @@ class TorrentBurner:
         for a in alerts:
             name = type(a).__name__
             if name in ("tracker_error_alert", "scrape_failed_alert"):
+                msg = a.message()
+                # libtorrent анонсируется с каждого локального интерфейса, и
+                # для loopback/0.0.0.0 это заведомо недостижимо. Такие строки —
+                # шум, который забивает настоящую причину.
+                if "unreachable" in msg or "skipping tracker announce" in msg:
+                    continue
                 self.errors += 1
-                self.last_error = f"трекер: {getattr(a, 'error_message', lambda: '')() or a.message()}"
+                self.last_error = f"трекер: {msg}"
             elif name in ("session_error_alert", "torrent_error_alert",
                           "peer_error_alert", "udp_error_alert"):
                 self.errors += 1
                 self.last_error = a.message()
             elif name == "tracker_reply_alert":
-                self.tracker_peers = int(getattr(a, "num_peers", 0) or 0)
+                got = int(getattr(a, "num_peers", 0) or 0)
+                self.tracker_peers = max(self.tracker_peers, got)
                 self.tracker_ok = True
 
     def poll(self) -> None:

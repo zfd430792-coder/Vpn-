@@ -631,12 +631,19 @@ class Bot:
     def _torrent_line(self, s) -> str:
         """В торрент-режиме воркеров нет — важны пиры и состояние раздачи."""
         t = getattr(s, "tstats", None) or {}
-        line = f"🌀 Раздач — {t.get('torrents', 0)} · пиров {t.get('peers', 0)}"
+        peers, given = t.get("peers", 0), t.get("tracker_peers", 0)
+        line = f"🌀 Раздач — {t.get('torrents', 0)} · подключено пиров {peers}"
         state = t.get("state")
         if state:
             line += f"\n📥 Состояние — {esc(state)}"
-        if not t.get("peers") and t.get("tracker_ok"):
-            line += f"\n🔎 Трекер ответил, пиров даёт {t.get('tracker_peers', 0)}"
+        if t.get("tracker_ok"):
+            line += f"\n🔎 Трекер отдал пиров — {given}"
+            # Это и есть развилка: пиры есть, а подключиться к ним не выходит —
+            # значит режется не трекер, а сами пир-соединения через SOCKS.
+            if given and not peers:
+                line += "\n⚠️ Пиры есть, но соединения не проходят через ноду"
+        elif not peers:
+            line += "\n🔎 Трекер ещё не ответил"
         return line
 
     def _status_card(self, title: str = "") -> str:
