@@ -26,17 +26,16 @@ except ImportError:  # noqa: WPS440
 
 DEFAULT_CAP = 2 << 30  # сколько один торрент качает, прежде чем начать заново
 
-# Встроенные раздачи на случай, когда своих не добавили. Официальные образы
-# Ubuntu: тысячи сидов, канал забивают целиком, и это законно — abuse-жалоб
-# хостеру не будет. infohash взяты из .torrent с releases.ubuntu.com.
-_UBUNTU_TRACKERS = ("&tr=https%3A%2F%2Ftorrent.ubuntu.com%2Fannounce"
-                    "&tr=https%3A%2F%2Fipv6.torrent.ubuntu.com%2Fannounce")
-DEFAULT_MAGNETS = [
-    "magnet:?xt=urn:btih:01c137287d6f0ed05a56742dae794f632c79ff3d"
-    "&dn=ubuntu-24.04.4-desktop-amd64.iso" + _UBUNTU_TRACKERS,
-    "magnet:?xt=urn:btih:62a4d9e139f3315f8716bcccca0cc984a9809da1"
-    "&dn=ubuntu-24.04.4-live-server-amd64.iso" + _UBUNTU_TRACKERS,
+# Встроенные раздачи. Берём .torrent, а не magnet: в magnet нет списка
+# файлов, его выкачивают у пиров, и без пиров торрент намертво встаёт на
+# "жду метаданные". В .torrent метаданные уже внутри — качать можно сразу,
+# как только найдётся хоть один пир.
+# Официальные образы Ubuntu: тысячи сидов, законно, abuse-жалоб не будет.
+DEFAULT_SOURCES = [
+    "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso.torrent",
+    "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-desktop-amd64.iso.torrent",
 ]
+DEFAULT_MAGNETS = DEFAULT_SOURCES  # старое имя, чтобы не ломать импорты
 
 
 def available() -> bool:
@@ -72,7 +71,10 @@ class TorrentBurner:
             "proxy_hostnames": True,
             "force_proxy": True,      # ни одного соединения мимо туннеля
             "anonymous_mode": True,
-            "enable_dht": False,      # UDP мимо SOCKS5 — выключаем
+            # DHT даёт пиров, когда трекер молчит. Он по UDP, и через SOCKS5
+            # работает не везде, но force_proxy не даст ему уйти мимо ноды:
+            # в худшем случае просто не заработает.
+            "enable_dht": True,
             "enable_lsd": False,
             "enable_natpmp": False,
             "enable_upnp": False,
@@ -109,6 +111,23 @@ class TorrentBurner:
             raise RuntimeError(f"ни одна раздача не добавилась ({self.last_error})")
         return len(self.handles)
 
+    @staticmethod
+    def _drop_ipv6_trackers(h) -> None:
+        """Убрать IPv6-трекеры у добавленного торрента: на IPv4-сервере они
+        недостижимы и только копят ошибки, забивая настоящую причину."""
+        try:
+            # у torrent_handle трекеры приходят словарями, у torrent_info —
+            # объектами; поддерживаем оба вида
+            urls = [t["url"] if isinstance(t, dict) else t.url for t in h.trackers()]
+        except Exception:  # noqa: BLE001
+            return
+        keep = [u for u in urls if "ipv6." not in u]
+        if keep and len(keep) != len(urls):
+            try:
+                h.replace_trackers([{"url": u, "tier": i} for i, u in enumerate(keep)])
+            except Exception:  # noqa: BLE001
+                pass
+
     def _add(self, src: str):
         src = src.strip()
         if src.startswith("magnet:"):
@@ -124,6 +143,7 @@ class TorrentBurner:
             raise ValueError("нужна magnet-ссылка или ссылка на .torrent")
         params.save_path = self.save_dir
         h = self.ses.add_torrent(params)
+        self._drop_ipv6_trackers(h)
         self.handles.append(h)
         return h
 
