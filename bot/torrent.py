@@ -37,6 +37,17 @@ DEFAULT_SOURCES = [
 ]
 DEFAULT_MAGNETS = DEFAULT_SOURCES  # старое имя, чтобы не ломать импорты
 
+# Публичные open-трекеры по UDP. У образов Ubuntu трекеры только HTTPS, а их
+# announce зашифрован — anti-torrent детекторы его обычно не видят. UDP-announce
+# идёт открыто и распознаётся сразу, плюс такие трекеры дают заметно больше
+# пиров. Недоступные из списка просто отвалятся с ошибкой и никому не мешают.
+EXTRA_TRACKERS = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://tracker.openbittorrent.com:6969/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+]
+
 
 def available() -> bool:
     return lt is not None
@@ -44,11 +55,12 @@ def available() -> bool:
 
 class TorrentBurner:
     def __init__(self, socks_host: str, socks_port: int, save_dir: str,
-                 cap_per_torrent: int = DEFAULT_CAP):
+                 cap_per_torrent: int = DEFAULT_CAP, extra_trackers: bool = True):
         self.socks_host = socks_host
         self.socks_port = socks_port
         self.save_dir = save_dir
         self.cap = cap_per_torrent
+        self.extra_trackers = extra_trackers
         self.ses = None
         self.handles: List = []
         self.sources: List[str] = []
@@ -133,6 +145,21 @@ class TorrentBurner:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _enrich_trackers(self, h) -> None:
+        """Досыпать публичные UDP-трекеры: больше пиров и открытый announce."""
+        if not self.extra_trackers:
+            return
+        try:
+            have = {t["url"] if isinstance(t, dict) else t.url for t in h.trackers()}
+        except Exception:  # noqa: BLE001
+            have = set()
+        for url in EXTRA_TRACKERS:
+            if url not in have:
+                try:
+                    h.add_tracker({"url": url, "tier": 1})
+                except Exception:  # noqa: BLE001
+                    pass
+
     def _add(self, src: str):
         src = src.strip()
         if src.startswith("magnet:"):
@@ -149,6 +176,7 @@ class TorrentBurner:
         params.save_path = self.save_dir
         h = self.ses.add_torrent(params)
         self._drop_ipv6_trackers(h)
+        self._enrich_trackers(h)
         self.handles.append(h)
         return h
 
