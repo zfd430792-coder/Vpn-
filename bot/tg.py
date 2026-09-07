@@ -57,6 +57,18 @@ _STATUS_ICON = {"жив": "✅", "мёртв/исчерпан": "⛔", "загл
 MODE_LABEL = {"http": "🍽 качать файлы", "torrent": "🌀 торренты"}
 
 
+def _source_name(src: str) -> str:
+    """Читаемое имя раздачи. Источник бывает и magnet, и ссылкой на .torrent,
+    поэтому вытаскивать dn= вслепую нельзя — у ссылки его нет."""
+    s = str(src or "").strip()
+    if "dn=" in s:
+        return up_unquote(s.split("dn=", 1)[1].split("&")[0])
+    if s.lower().startswith(("http://", "https://")):
+        tail = s.rstrip("/").rsplit("/", 1)[-1]
+        return up_unquote(tail) or s
+    return s
+
+
 def _key_mode(key: dict) -> str:
     return "torrent" if (key or {}).get("mode") == "torrent" else "http"
 
@@ -554,13 +566,11 @@ class Bot:
                     "<code>pip install libtorrent</code> в venv бота и перезапуск.", ""]
         if self.store.magnets:
             for i, m in enumerate(self.store.magnets, 1):
-                name = m.split("dn=", 1)[1].split("&")[0] if "dn=" in m else m
-                out.append(f"<b>{i}.</b> {esc(_short(up_unquote(name), 44))}")
+                out.append(f"<b>{i}.</b> {esc(_short(_source_name(m), 44))}")
         else:
             out.append("Своих раздач нет — работают встроенные:")
             for m in DEFAULT_MAGNETS:
-                name = m.split("dn=", 1)[1].split("&")[0]
-                out.append(f"  • {esc(up_unquote(name))}")
+                out.append(f"  • {esc(_short(_source_name(m), 44))}")
             out.append("")
             out.append("Это официальные образы Ubuntu: тысячи сидов, "
                        "канал забивают целиком, и раздача законная.")
@@ -1769,10 +1779,13 @@ class Bot:
             return
         if aw == "magnet":
             uri = text.strip().split()[0] if text.strip() else ""
-            if not uri.startswith("magnet:?"):
+            if not (uri.startswith("magnet:?") or
+                    (uri.lower().startswith(("http://", "https://"))
+                     and ".torrent" in uri.lower())):
                 self.awaiting[chat_id] = "magnet"
-                await self.tg.send(chat_id, "Это не magnet-ссылка. Она начинается "
-                                            "с <code>magnet:?xt=</code>.",
+                await self.tg.send(chat_id, "Нужна magnet-ссылка "
+                                            "(<code>magnet:?xt=</code>) или прямая "
+                                            "ссылка на <code>.torrent</code>.",
                                    _kb([[_btn("⬅️ Раздачи", "magnets")]]))
                 return
             added = self.store.add_magnet(uri)
