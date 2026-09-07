@@ -628,6 +628,17 @@ class Bot:
     def _status_kb(self) -> dict:
         return _kb([[_btn("🔄 Обновить", "status"), _btn("⬅️ Меню", "menu")]])
 
+    def _torrent_line(self, s) -> str:
+        """В торрент-режиме воркеров нет — важны пиры и состояние раздачи."""
+        t = getattr(s, "tstats", None) or {}
+        line = f"🌀 Раздач — {t.get('torrents', 0)} · пиров {t.get('peers', 0)}"
+        state = t.get("state")
+        if state:
+            line += f"\n📥 Состояние — {esc(state)}"
+        if not t.get("peers") and t.get("tracker_ok"):
+            line += f"\n🔎 Трекер ответил, пиров даёт {t.get('tracker_peers', 0)}"
+        return line
+
     def _status_card(self, title: str = "") -> str:
         s = self.session
         if not s.counter:
@@ -644,10 +655,11 @@ class Bot:
                  f"  (в среднем {esc(_sz(eaten / elapsed))}/s)",
                  f"🖧 Выходов — {len(s.live_nodes) or s.node_count} из {s.node_count}"
                  + (" (проба молчит, жру вслепую)" if s.probe_blind else ""),
-                 f"🧵 Воркеров — {s.effective_workers or s.workers}"
-                 + (f" из {s.workers}" if s.effective_workers and
-                    s.effective_workers < s.workers else "")
-                 + f" · качают {s.counter.active}",
+                 (self._torrent_line(s) if s.mode == "torrent" else
+                  f"🧵 Воркеров — {s.effective_workers or s.workers}"
+                  + (f" из {s.workers}" if s.effective_workers and
+                     s.effective_workers < s.workers else "")
+                  + f" · качают {s.counter.active}"),
                  f"⏱ Аптайм — {esc(_dur(elapsed))}"]
         if s.plan_total:
             lines.append(f"📦 План — {esc(_sz(s.plan_used + eaten))} / {esc(_sz(s.plan_total))}")

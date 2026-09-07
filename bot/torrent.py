@@ -58,6 +58,8 @@ class TorrentBurner:
         self.errors = 0
         self.last_error = ""
         self.started_at = 0.0
+        self.tracker_ok = False
+        self.tracker_peers = 0
 
     # ---------- запуск ----------
     def _settings(self) -> dict:
@@ -76,7 +78,11 @@ class TorrentBurner:
             "enable_upnp": False,
             "enable_incoming_utp": False,
             "enable_outgoing_utp": False,
-            "alert_mask": 0,
+            # Без алертов торрент молчит, и причину простоя (трекер не
+            # отвечает, метаданные не приходят) взять негде.
+            "alert_mask": (lt.alert.category_t.error_notification
+                           | lt.alert.category_t.tracker_notification
+                           | lt.alert.category_t.status_notification),
             "connections_limit": 800,
             "active_downloads": -1,
             "active_limit": -1,
@@ -128,10 +134,40 @@ class TorrentBurner:
         except Exception:  # noqa: BLE001
             return str(id(h))
 
+    STATE_RU = {
+        "checking_files": "проверка файлов",
+        "downloading_metadata": "жду метаданные (нужны пиры)",
+        "downloading": "качаю",
+        "finished": "готово",
+        "seeding": "раздаю",
+        "allocating": "выделяю место",
+        "checking_resume_data": "проверка",
+    }
+
+    def _drain_alerts(self) -> None:
+        """Забрать сообщения libtorrent — там причина, если торрент стоит."""
+        try:
+            alerts = self.ses.pop_alerts()
+        except Exception:  # noqa: BLE001
+            return
+        for a in alerts:
+            name = type(a).__name__
+            if name in ("tracker_error_alert", "scrape_failed_alert"):
+                self.errors += 1
+                self.last_error = f"трекер: {getattr(a, 'error_message', lambda: '')() or a.message()}"
+            elif name in ("session_error_alert", "torrent_error_alert",
+                          "peer_error_alert", "udp_error_alert"):
+                self.errors += 1
+                self.last_error = a.message()
+            elif name == "tracker_reply_alert":
+                self.tracker_peers = int(getattr(a, "num_peers", 0) or 0)
+                self.tracker_ok = True
+
     def poll(self) -> None:
         """Учесть скачанное и перезапустить торренты, упёршиеся в лимит."""
         if not self.ses:
             return
+        self._drain_alerts()
         for h in list(self.handles):
             try:
                 st = h.status()
@@ -176,6 +212,7 @@ class TorrentBurner:
         rate = 0
         peers = 0
         active = 0
+        state = ""
         for h in list(self.handles):
             try:
                 st = h.status()
@@ -183,11 +220,16 @@ class TorrentBurner:
                 continue
             rate += int(getattr(st, "download_payload_rate", 0) or 0)
             peers += int(getattr(st, "num_peers", 0) or 0)
+            if not state:
+                raw = str(getattr(st, "state", "") or "")
+                state = self.STATE_RU.get(raw, raw)
             if getattr(st, "num_peers", 0):
                 active += 1
         return {"bytes": self.total_bytes, "rate": rate, "peers": peers,
                 "torrents": len(self.handles), "active": active,
-                "errors": self.errors, "last_error": self.last_error}
+                "errors": self.errors, "last_error": self.last_error,
+                "state": state, "tracker_ok": self.tracker_ok,
+                "tracker_peers": self.tracker_peers}
 
     def stop(self) -> None:
         if self.ses:

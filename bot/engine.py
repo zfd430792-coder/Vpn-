@@ -31,6 +31,7 @@ class BurnSession:
         self.probe_blind: bool = False
         self.effective_workers: int = 0
         self.mode: str = "http"
+        self.tstats: dict = {}
         self.torrent: Optional[TorrentBurner] = None
 
     def running(self) -> bool:
@@ -113,6 +114,7 @@ class BurnSession:
             if not b or not self.counter:
                 continue
             st = b.stats()
+            self.tstats = st
             self.counter.bytes = st["bytes"]
             self.counter.active = st["active"]
             self.counter.errors = st["errors"]
