@@ -26,6 +26,18 @@ except ImportError:  # noqa: WPS440
 
 DEFAULT_CAP = 2 << 30  # сколько один торрент качает, прежде чем начать заново
 
+# Встроенные раздачи на случай, когда своих не добавили. Официальные образы
+# Ubuntu: тысячи сидов, канал забивают целиком, и это законно — abuse-жалоб
+# хостеру не будет. infohash взяты из .torrent с releases.ubuntu.com.
+_UBUNTU_TRACKERS = ("&tr=https%3A%2F%2Ftorrent.ubuntu.com%2Fannounce"
+                    "&tr=https%3A%2F%2Fipv6.torrent.ubuntu.com%2Fannounce")
+DEFAULT_MAGNETS = [
+    "magnet:?xt=urn:btih:01c137287d6f0ed05a56742dae794f632c79ff3d"
+    "&dn=ubuntu-24.04.4-desktop-amd64.iso" + _UBUNTU_TRACKERS,
+    "magnet:?xt=urn:btih:62a4d9e139f3315f8716bcccca0cc984a9809da1"
+    "&dn=ubuntu-24.04.4-live-server-amd64.iso" + _UBUNTU_TRACKERS,
+]
+
 
 def available() -> bool:
     return lt is not None
@@ -95,8 +107,15 @@ class TorrentBurner:
         src = src.strip()
         if src.startswith("magnet:"):
             params = lt.parse_magnet_uri(src)
+        elif src.lower().startswith(("http://", "https://")):
+            # .torrent-файл весит копейки, тянем напрямую — на счётчик не влияет
+            import requests
+            r = requests.get(src, timeout=30)
+            r.raise_for_status()
+            params = lt.add_torrent_params()
+            params.ti = lt.torrent_info(lt.bdecode(r.content))
         else:
-            raise ValueError("нужна magnet-ссылка")
+            raise ValueError("нужна magnet-ссылка или ссылка на .torrent")
         params.save_path = self.save_dir
         h = self.ses.add_torrent(params)
         self.handles.append(h)

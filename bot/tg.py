@@ -16,6 +16,7 @@ from .provision import provision_agent
 from .report import fmt_bytes, plan_summary, units_to_bytes
 from .selfupdate import local_head, remote_head, run_self_update
 from .store import KeyStore, default_name
+from .torrent import DEFAULT_MAGNETS
 from .torrent import available as torrent_available
 from .traffic import BIG_FILES
 
@@ -542,6 +543,10 @@ class Bot:
                 "2. Включи «Только свои источники».")
 
     # ---- торрент-раздачи ----
+    def _magnet_list(self) -> List[str]:
+        """Свои раздачи, а если их нет — встроенные, чтобы работало из коробки."""
+        return list(self.store.magnets) if self.store.magnets else list(DEFAULT_MAGNETS)
+
     def _magnets_text(self) -> str:
         out = ["🌀 <b>Раздачи</b>", ""]
         if not torrent_available():
@@ -552,7 +557,13 @@ class Bot:
                 name = m.split("dn=", 1)[1].split("&")[0] if "dn=" in m else m
                 out.append(f"<b>{i}.</b> {esc(_short(up_unquote(name), 44))}")
         else:
-            out.append("Пока пусто — добавь magnet-ссылку.")
+            out.append("Своих раздач нет — работают встроенные:")
+            for m in DEFAULT_MAGNETS:
+                name = m.split("dn=", 1)[1].split("&")[0]
+                out.append(f"  • {esc(up_unquote(name))}")
+            out.append("")
+            out.append("Это официальные образы Ubuntu: тысячи сидов, "
+                       "канал забивают целиком, и раздача законная.")
         out += ["", "Торренты жрут ровнее HTTP: много пиров и нет единого "
                     "рейт-лимитера, который режет одинокого качальщика.", "",
                 "Ссылки бери у легальных раздач: дистрибутивы Linux "
@@ -745,13 +756,8 @@ class Bot:
                           "<code>pip install libtorrent</code> в venv бота "
                           "и перезапусти.", self._menu_kb())
                 return
-            if not self.store.magnets:
-                await put("🌀 <b>Нет раздач</b>\n\nДобавь magnet-ссылку в разделе "
-                          "«Раздачи», иначе торрентам нечего качать.",
-                          _kb([[_btn("🌀 Раздачи", "magnets")], [_btn("⬅️ Меню", "menu")]]))
-                return
             title = f"{title} · торренты"
-        payload = list(self.store.magnets) if mode == "torrent" else self._files()
+        payload = self._magnet_list() if mode == "torrent" else self._files()
         try:
             await self.session.start(sub_ob, limit, payload, title=title,
                                      plan_total=total, plan_used=used, auto_limit=False)
@@ -1226,9 +1232,10 @@ class Bot:
                     chat_id, mid,
                     "🌀 <b>Добавить раздачу</b>\n\n"
                     "Пришли magnet-ссылку (начинается с <code>magnet:?xt=</code>).\n\n"
-                    "Где взять легальные: releases.ubuntu.com, "
-                    "cdimage.debian.org, archive.org — там раздачи с сотнями "
-                    "сидов, канал забьют полностью.",
+                    "Можно и прямую ссылку на <code>.torrent</code>.\n\n"
+                    "Своя раздача заменит встроенные образы Ubuntu. Где брать "
+                    "легальные: releases.ubuntu.com, cdimage.debian.org, "
+                    "archive.org — там сотни сидов.",
                     _kb([[_btn("⬅️ Раздачи", "magnets")]]))
         elif data.startswith("mdel:"):
             self.store.remove_magnet(int(data[5:]))
