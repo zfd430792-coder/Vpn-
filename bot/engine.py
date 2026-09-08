@@ -10,6 +10,18 @@ from .traffic import (PROBE_DEAD, WORKERS_PER_NODE, Counter, burn,
                       probe_node, probe_nodes)
 
 
+# Подписки часто содержат служебные записи — «Авто», «выбор», «best». Это не
+# отдельные выходы, а подсказка клиенту выбрать лучший, и торрент через такую
+# запись не идёт. Для жора нужны настоящие ноды.
+_SERVICE_MARKS = ("авто", "auto", "выбор", "select", "best", "fastest",
+                  "быстр", "случайн", "random", "балансир", "balance")
+
+
+def is_service_node(tag: str) -> bool:
+    t = str(tag or "").lower()
+    return any(m in t for m in _SERVICE_MARKS)
+
+
 class BurnSession:
     def __init__(self, workers: int, singbox_bin: str, port: int,
                  data_dir: str = "/tmp/vpn-traffic-bot"):
@@ -118,6 +130,9 @@ class BurnSession:
         )
         return len(self.live_nodes)
 
+    def _tag(self, idx: int) -> str:
+        return self.node_tags[idx] if 0 <= idx < len(self.node_tags) else ""
+
     async def _pick_torrent_node(self) -> Optional[int]:
         """Нода, которая реально отвечает: торренту нужна именно рабочая,
         запасных у одной сессии нет.
@@ -130,7 +145,10 @@ class BurnSession:
         # ни одна не отвечает.
         if self.probe_full:
             mine = [i for i in self.probe_full if i in self.preferred]
-            return (mine or self.probe_full)[0]
+            pool = mine or self.probe_full
+            # настоящие ноды вперёд, служебные — только если других нет
+            real = [i for i in pool if not is_service_node(self._tag(i))]
+            return (real or pool)[0]
         checked = await asyncio.gather(
             *[probe_node("127.0.0.1", self.port + i, timeout=6.0) for i in self.live_nodes],
             return_exceptions=True)
@@ -158,6 +176,8 @@ class BurnSession:
             order = self.probe_full or self.live_nodes
             order = [i for i in order if i in self.preferred] + \
                     [i for i in order if i not in self.preferred]
+            order = [i for i in order if not is_service_node(self._tag(i))] + \
+                    [i for i in order if is_service_node(self._tag(i))]
             for attempt, idx in enumerate(order):
                 if self.stop_event.is_set():
                     return
