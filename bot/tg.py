@@ -786,6 +786,7 @@ class Bot:
                            [_btn("🆔 Задать HWID вручную", f"hwid:{i}")],
                            [_btn("⬅️ Меню", "menu")]]))
             return
+        all_ob = list(sub_ob)
         sub_ob = _filter_geo(sub_ob, key.get("country"))
         if key.get("country"):
             title = f"{title} · {key['country']}"
@@ -803,6 +804,11 @@ class Bot:
                           "и перезапусти.", self._menu_kb())
                 return
             title = f"{title} · торренты"
+            # Торренту нужна ОДНА отвечающая нода, а не конкретная страна.
+            # Фильтр по стране мог оставить единственную ноду, и если она
+            # мёртвая — запускать было не через что. Берём весь список.
+            if len(sub_ob) < len(all_ob):
+                sub_ob = all_ob
         payload = self._magnet_list() if mode == "torrent" else self._files()
         try:
             await self.session.start(sub_ob, limit, payload, title=title,

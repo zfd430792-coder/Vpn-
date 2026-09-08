@@ -36,6 +36,7 @@ class BurnSession:
         self.torrent: Optional[TorrentBurner] = None
         self.torrent_node: Optional[int] = None
         self.node_switches: int = 0
+        self.probe_full: List[int] = []
 
     def running(self) -> bool:
         return self.burn_task is not None and not self.burn_task.done()
@@ -66,6 +67,7 @@ class BurnSession:
         # выход попал бы в мёртвые. Поэтому запускаемся всегда, а вслепую —
         # лишь когда не ответил вообще никто.
         self.probe_blind = False
+        self.probe_full = list(full)
         if full:
             self.live_nodes = full
         elif conn:
@@ -108,10 +110,19 @@ class BurnSession:
         return len(self.live_nodes)
 
     async def _pick_torrent_node(self) -> Optional[int]:
-        """Первая нода, которая реально отвечает: торренту нужна именно
-        рабочая, запасных у одной сессии нет."""
-        for idx in self.live_nodes:
-            if await probe_node("127.0.0.1", self.port + idx, timeout=10.0) != PROBE_DEAD:
+        """Нода, которая реально отвечает: торренту нужна именно рабочая,
+        запасных у одной сессии нет.
+
+        Проба уже отработала при старте, так что берём её результат вместо
+        повторного перебора: на мёртвых нодах он складывался в минуты.
+        """
+        if self.probe_full:
+            return self.probe_full[0]
+        checked = await asyncio.gather(
+            *[probe_node("127.0.0.1", self.port + i, timeout=6.0) for i in self.live_nodes],
+            return_exceptions=True)
+        for idx, res in zip(self.live_nodes, checked):
+            if res != PROBE_DEAD and not isinstance(res, BaseException):
                 return idx
         # Стучаться в localhost-порт бессмысленно: sing-box слушает его всегда,
         # даже когда до ноды не достучаться. Признак живой ноды — успешный
@@ -131,7 +142,8 @@ class BurnSession:
         PEER_WAIT = 75
         sync = asyncio.create_task(self._sync_torrent())
         try:
-            for attempt, idx in enumerate(self.live_nodes):
+            order = self.probe_full or self.live_nodes
+            for attempt, idx in enumerate(order):
                 if self.stop_event.is_set():
                     return
                 if attempt:  # первую ноду уже подобрали и запустили выше

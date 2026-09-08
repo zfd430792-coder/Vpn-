@@ -227,19 +227,25 @@ async def _socks_try(host: str, port: int, target: str, tport: int,
             pass
 
 
-async def probe_node(host: str, port: int, timeout: float = 12.0) -> int:
-    """PROBE_FULL — данные идут, PROBE_CONNECT — только соединение, 0 — мертво."""
-    for target, tport in PROBE_TARGETS:
-        if await _socks_try(host, port, target, tport, True, timeout):
-            return PROBE_FULL
-    for target, tport in CONNECT_TARGETS:
-        if await _socks_try(host, port, target, tport, False, timeout):
-            return PROBE_CONNECT
-    return PROBE_DEAD
+async def probe_node(host: str, port: int, timeout: float = 6.0) -> int:
+    """PROBE_FULL — данные идут, PROBE_CONNECT — только соединение, 0 — мертво.
+
+    Цели проверяются ПАРАЛЛЕЛЬНО: перебор по очереди на мёртвой ноде
+    складывался в минуту ожидания, и запуск жора висел без объяснений.
+    """
+    full = await asyncio.gather(
+        *[_socks_try(host, port, t, tp, True, timeout) for t, tp in PROBE_TARGETS],
+        return_exceptions=True)
+    if any(r is True for r in full):
+        return PROBE_FULL
+    conn = await asyncio.gather(
+        *[_socks_try(host, port, t, tp, False, timeout) for t, tp in CONNECT_TARGETS],
+        return_exceptions=True)
+    return PROBE_CONNECT if any(r is True for r in conn) else PROBE_DEAD
 
 
 async def probe_nodes(host: str, base_port: int, count: int,
-                      timeout: float = 12.0):
+                      timeout: float = 6.0):
     """(ноды с прокачкой, ноды хотя бы с соединением)."""
     results = await asyncio.gather(
         *[probe_node(host, base_port + i, timeout) for i in range(count)],
