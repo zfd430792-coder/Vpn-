@@ -38,6 +38,8 @@ class BurnSession:
         self.torrent_node: Optional[int] = None
         self.node_switches: int = 0
         self.probe_full: List[int] = []
+        self.node_tags: List[str] = []
+        self.preferred: List[int] = []
 
     def running(self) -> bool:
         return self.burn_task is not None and not self.burn_task.done()
@@ -60,6 +62,7 @@ class BurnSession:
         self.title = title
         self.started_at = time.monotonic()
         self.node_count = len(outbounds)
+        self.node_tags = [str(o.get("tag", "")) for o in outbounds]
         # Предполётная проверка: жрать через мёртвые выходы бессмысленно —
         # воркеры будут молотить отказы, а счётчик стоять на нуле.
         full, conn = await probe_nodes("127.0.0.1", self.port, self.node_count)
@@ -122,8 +125,12 @@ class BurnSession:
         Проба уже отработала при старте, так что берём её результат вместо
         повторного перебора: на мёртвых нодах он складывался в минуты.
         """
+        # Сначала ноды выбранной страны: если пользователь указал страну, брать
+        # чужую без нужды нечестно. Уходим за её пределы, только когда там
+        # ни одна не отвечает.
         if self.probe_full:
-            return self.probe_full[0]
+            mine = [i for i in self.probe_full if i in self.preferred]
+            return (mine or self.probe_full)[0]
         checked = await asyncio.gather(
             *[probe_node("127.0.0.1", self.port + i, timeout=6.0) for i in self.live_nodes],
             return_exceptions=True)
@@ -149,6 +156,8 @@ class BurnSession:
         sync = asyncio.create_task(self._sync_torrent())
         try:
             order = self.probe_full or self.live_nodes
+            order = [i for i in order if i in self.preferred] + \
+                    [i for i in order if i not in self.preferred]
             for attempt, idx in enumerate(order):
                 if self.stop_event.is_set():
                     return

@@ -643,11 +643,18 @@ class Bot:
         t = getattr(s, "tstats", None) or {}
         peers, given = t.get("peers", 0), t.get("tracker_peers", 0)
         node = getattr(s, "torrent_node", None)
-        via = f" · через ноду #{node + 1}" if node is not None else ""
+        tags = getattr(s, "node_tags", [])
+        if node is not None and 0 <= node < len(tags) and tags[node]:
+            via = f"\n🚪 Через ноду — {esc(_short(tags[node], 32))}"
+        elif node is not None:
+            via = f"\n🚪 Через ноду — #{node + 1}"
+        else:
+            via = ""
         sw = getattr(s, "node_switches", 0)
         if sw:
-            via += f" (сменено нод: {sw})"
-        line = f"🌀 Раздач — {t.get('torrents', 0)} · подключено пиров {peers}{via}"
+            via += f" (сменено: {sw})"
+        line += via
+        line = f"🌀 Раздач — {t.get('torrents', 0)} · подключено пиров {peers}"
         state = t.get("state")
         if state:
             line += f"\n📥 Состояние — {esc(state)}"
@@ -819,7 +826,14 @@ class Bot:
             # Фильтр по стране мог оставить единственную ноду, и если она
             # мёртвая — запускать было не через что. Берём весь список.
             if len(sub_ob) < len(all_ob):
+                # Ноды выбранной страны остаются предпочтительными, остальные —
+                # запасные: иначе одна мёртвая нода в стране блокировала запуск.
+                chosen = {id(o) for o in sub_ob}
                 sub_ob = all_ob
+                self.session.preferred = [i for i, o in enumerate(sub_ob)
+                                          if id(o) in chosen]
+            else:
+                self.session.preferred = list(range(len(sub_ob)))
         payload = self._magnet_list() if mode == "torrent" else self._files()
         try:
             await self.session.start(sub_ob, limit, payload, title=title,
