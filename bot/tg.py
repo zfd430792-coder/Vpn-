@@ -653,8 +653,7 @@ class Bot:
         sw = getattr(s, "node_switches", 0)
         if sw:
             via += f" (сменено: {sw})"
-        line += via
-        line = f"🌀 Раздач — {t.get('torrents', 0)} · подключено пиров {peers}"
+        line = f"🌀 Раздач — {t.get('torrents', 0)} · подключено пиров {peers}" + via
         state = t.get("state")
         if state:
             line += f"\n📥 Состояние — {esc(state)}"
