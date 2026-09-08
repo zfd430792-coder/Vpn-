@@ -30,6 +30,7 @@ class BurnSession:
         self.title: str = ""
         self.live_nodes: List[int] = []
         self.probe_blind: bool = False
+        self.probe_half: bool = False
         self.effective_workers: int = 0
         self.mode: str = "http"
         self.tstats: dict = {}
@@ -68,10 +69,15 @@ class BurnSession:
         # лишь когда не ответил вообще никто.
         self.probe_blind = False
         self.probe_full = list(full)
+        # half — ноды, которые приняли SOCKS-соединение, но не пропустили
+        # через себя ни байта. Формально «живые», фактически бесполезные:
+        # именно так выглядит нода, которая режет трафик или забанила клиента.
+        self.probe_half = False
         if full:
             self.live_nodes = full
         elif conn:
             self.live_nodes = conn
+            self.probe_half = True
         else:
             self.live_nodes = list(range(self.node_count))
             self.probe_blind = True

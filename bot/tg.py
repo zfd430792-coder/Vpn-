@@ -684,7 +684,9 @@ class Bot:
                  f"⚡ Скорость — {esc(_sz(s.counter.rate()))}/s"
                  f"  (в среднем {esc(_sz(eaten / elapsed))}/s)",
                  f"🖧 Выходов — {len(s.live_nodes) or s.node_count} из {s.node_count}"
-                 + (" (проба молчит, жру вслепую)" if s.probe_blind else ""),
+                 + (" (проба молчит, жру вслепую)" if s.probe_blind else "")
+                 + (" — соединение есть, данные не идут"
+                    if getattr(s, "probe_half", False) else ""),
                  (self._torrent_line(s) if s.mode == "torrent" else
                   f"🧵 Воркеров — {s.effective_workers or s.workers}"
                   + (f" из {s.workers}" if s.effective_workers and
@@ -704,6 +706,10 @@ class Bot:
             reason = s.box.failure_summary() if s.box else ""
             if reason:
                 lines += ["", f"⛔ <b>Причина</b> — {esc(reason)}"]
+            elif getattr(s, "probe_half", False):
+                lines += ["", "⛔ <b>Причина</b> — ноды принимают соединение, но "
+                              "не пропускают трафик. Так выглядит исчерпанный "
+                              "лимит или блокировка ключа на стороне панели."]
             box_log = s.box.tail_log(4) if s.box else ""
             if box_log:
                 lines += ["", "🔍 <b>sing-box пишет:</b>",
