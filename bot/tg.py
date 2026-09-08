@@ -657,6 +657,11 @@ class Bot:
             # значит режется не трекер, а сами пир-соединения через SOCKS.
             if given and not peers:
                 line += "\n⚠️ Пиры есть, но соединения не проходят через ноду"
+                fails, why = t.get("peer_fails", 0), t.get("peer_reason", "")
+                if fails:
+                    line += f"\n💥 Обрывов с пирами — {fails}"
+                    if why:
+                        line += f" · {esc(why)}"
         elif not peers:
             line += "\n🔎 Трекер ещё не ответил"
         return line

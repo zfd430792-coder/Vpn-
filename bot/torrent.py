@@ -71,6 +71,8 @@ class TorrentBurner:
         self.started_at = 0.0
         self.tracker_ok = False
         self.tracker_peers = 0
+        self.peer_fails = 0
+        self.peer_reason = ""
 
     # ---------- запуск ----------
     def _settings(self) -> dict:
@@ -96,7 +98,15 @@ class TorrentBurner:
             # отвечает, метаданные не приходят) взять негде.
             "alert_mask": (lt.alert.category_t.error_notification
                            | lt.alert.category_t.tracker_notification
-                           | lt.alert.category_t.status_notification),
+                           | lt.alert.category_t.status_notification
+                           | lt.alert.category_t.peer_notification),
+            # Пиры сидят на произвольных портах, и через прокси до них
+            # достучаться труднее: даём больше времени и попыток, иначе
+            # libtorrent сдаётся раньше, чем соединение успевает встать.
+            "peer_connect_timeout": 25,
+            "connection_speed": 60,
+            "torrent_connect_boost": 60,
+            "max_failcount": 5,
             # Через SOCKS входящих соединений не будет: слушать порт незачем,
             # а анонс с локальных интерфейсов только плодит ошибки.
             "listen_interfaces": "127.0.0.1:0",
@@ -214,8 +224,26 @@ class TorrentBurner:
                     continue
                 self.errors += 1
                 self.last_error = f"трекер: {msg}"
+            elif name in ("peer_error_alert", "peer_disconnected_alert",
+                          "peer_blocked_alert"):
+                # Это и есть ответ на вопрос, кто рвёт связь с пирами.
+                self.peer_fails += 1
+                msg = a.message()
+                for needle, human in (
+                        ("timed out", "таймаут"),
+                        ("refused", "отказ в соединении"),
+                        ("reset", "соединение сброшено"),
+                        ("unreachable", "недостижим"),
+                        ("blocked", "заблокирован"),
+                        ("SOCKS", "прокси не пропустил"),
+                ):
+                    if needle.lower() in msg.lower():
+                        self.peer_reason = human
+                        break
+                else:
+                    self.peer_reason = msg.split(")")[-1].strip()[:60] or self.peer_reason
             elif name in ("session_error_alert", "torrent_error_alert",
-                          "peer_error_alert", "udp_error_alert"):
+                          "udp_error_alert"):
                 self.errors += 1
                 self.last_error = a.message()
             elif name == "tracker_reply_alert":
@@ -289,7 +317,8 @@ class TorrentBurner:
                 "torrents": len(self.handles), "active": active,
                 "errors": self.errors, "last_error": self.last_error,
                 "state": state, "tracker_ok": self.tracker_ok,
-                "tracker_peers": self.tracker_peers}
+                "tracker_peers": self.tracker_peers,
+                "peer_fails": self.peer_fails, "peer_reason": self.peer_reason}
 
     def stop(self) -> None:
         if self.ses:
