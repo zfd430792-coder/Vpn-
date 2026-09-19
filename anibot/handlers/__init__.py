@@ -1,0 +1,20 @@
+"""Сборка роутеров.
+
+Порядок важен: в catalog есть перехват любого текста (поиск), поэтому он
+идёт после админки — иначе съел бы ввод в её пошаговых формах.
+"""
+
+from __future__ import annotations
+
+from aiogram import Dispatcher
+
+from . import admin, catalog, channel, start, subscription, watch
+
+
+def setup(dp: Dispatcher) -> None:
+    dp.include_router(admin.router)
+    dp.include_router(subscription.router)
+    dp.include_router(start.router)
+    dp.include_router(watch.router)
+    dp.include_router(catalog.router)
+    dp.include_router(channel.router)

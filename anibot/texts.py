@@ -1,0 +1,151 @@
+"""Тексты сообщений. Всё в одном месте — чтобы менять, не трогая логику."""
+
+from __future__ import annotations
+
+import time
+
+SEP = "━━━━━━━━━━━━━━━"
+
+
+def human_size(size: int) -> str:
+    if not size:
+        return "—"
+    units = ("Б", "КБ", "МБ", "ГБ")
+    value = float(size)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.0f} {unit}" if unit in ("Б", "КБ") else f"{value:.2f} {unit}"
+        value /= 1024
+    return f"{value:.2f} ГБ"
+
+
+def human_duration(seconds: int) -> str:
+    if not seconds:
+        return "—"
+    minutes, sec = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{sec:02d}"
+    return f"{minutes}:{sec:02d}"
+
+
+def human_until(ts: int) -> str:
+    if not ts or ts <= int(time.time()):
+        return "нет"
+    left = ts - int(time.time())
+    days = left // 86400
+    if days > 3650:
+        return "навсегда"
+    if days >= 1:
+        return f"{days} дн."
+    hours = left // 3600
+    return f"{hours} ч." if hours else "меньше часа"
+
+
+GREETING = (
+    "🍿 <b>Аниме-бот</b>\n"
+    f"{SEP}\n"
+    "Пиши название — найду. Или жми кнопки ниже.\n\n"
+    "📚 В каталоге: <b>{anime}</b> тайтлов, <b>{episodes}</b> серий"
+)
+
+HELP = (
+    "❓ <b>Как пользоваться</b>\n"
+    f"{SEP}\n"
+    "• Напиши <b>название аниме</b> — покажу совпадения\n"
+    "• 📚 <b>Каталог</b> — всё, что есть, списком\n"
+    "• 🔥 <b>Популярное</b> — что чаще смотрят\n"
+    "• 👤 <b>Профиль</b> — подписка и статистика\n\n"
+    "Порядок выбора: <b>тайтл → сезон → серия → озвучка</b>.\n"
+    "Внутри плеера листай серии стрелками, озвучку меняй кнопкой 🎚"
+)
+
+NOT_FOUND = (
+    "🔍 По запросу <b>{query}</b> ничего не нашлось.\n\n"
+    "Проверь написание или загляни в 📚 каталог."
+)
+
+EMPTY_CATALOG = (
+    "📭 <b>Каталог пуст</b>\n\n"
+    "Админ ещё ничего не залил."
+)
+
+PROFILE = (
+    "👤 <b>Профиль</b>\n"
+    f"{SEP}\n"
+    "🆔 ID: <code>{user_id}</code>\n"
+    "⭐ Подписка: <b>{sub}</b>\n"
+    "👁 Просмотрено серий: <b>{views}</b>\n"
+    "{quota}"
+)
+
+QUOTA_LEFT = "🎁 Бесплатно осталось: <b>{left}</b> из {total}"
+QUOTA_OVER = "🚫 Бесплатные серии кончились — нужна подписка"
+QUOTA_UNLIMITED = "♾ Доступ без ограничений"
+
+PAYWALL = (
+    "⭐ <b>Нужна подписка</b>\n"
+    f"{SEP}\n"
+    "Бесплатные серии закончились ({total} шт.).\n"
+    "Оформи подписку — откроется весь каталог.\n\n"
+    "Оплата в Telegram Stars, прямо здесь, без карт."
+)
+
+SUBS_HEADER = (
+    "⭐ <b>Подписка</b>\n"
+    f"{SEP}\n"
+    "Текущая: <b>{sub}</b>\n\n"
+    "Выбери срок — оплата звёздами в один тап:"
+)
+
+PAID_OK = (
+    "✅ <b>Оплачено, спасибо!</b>\n"
+    f"{SEP}\n"
+    "Тариф: <b>{plan}</b>\n"
+    "Подписка активна: <b>{until}</b>\n\n"
+    "Весь каталог открыт — приятного просмотра 🍿"
+)
+
+ANIME_CARD = (
+    "🎬 <b>{title}</b>\n"
+    f"{SEP}\n"
+    "📀 Сезонов: <b>{seasons}</b>   ·   🎞 Серий: <b>{episodes}</b>\n"
+    "🎙 Озвучки: {dubs}\n\n"
+    "Выбери сезон:"
+)
+
+EPISODE_CAPTION = (
+    "🎬 <b>{title}</b>\n"
+    "📺 Сезон {season} · Серия {number}\n"
+    "🎙 {dub}   ·   💾 {size}   ·   ⏱ {duration}"
+)
+
+BANNED = "🚫 Доступ к боту закрыт."
+
+ADMIN_PANEL = (
+    "⚙️ <b>Админка</b>\n"
+    f"{SEP}\n"
+    "🎬 Тайтлов: <b>{anime}</b>   ·   🎞 Серий: <b>{episodes}</b>\n"
+    "👥 Юзеров: <b>{users}</b> (за сутки: <b>{day_users}</b>)\n"
+    "⭐ С подпиской: <b>{subs}</b>   ·   🚫 Забанено: <b>{banned}</b>\n"
+    "👁 Просмотров: <b>{views}</b> (за сутки: <b>{day_views}</b>)\n"
+    "💰 Заработано: <b>{stars}</b> ⭐"
+)
+
+ADMIN_HOWTO = (
+    "📥 <b>Как добавлять серии</b>\n"
+    f"{SEP}\n"
+    "<b>Способ 1 — через канал.</b> Залей видео в канал-хранилище "
+    "и напиши подпись:\n"
+    "<pre>Название: Моё Аниме\n"
+    "Сезон: 2\n"
+    "Серия: 7\n"
+    "Озвучка: Studio Band</pre>\n"
+    "Бот подхватит сам.\n\n"
+    "<b>Способ 2 — прямо сюда.</b> Пришли видео мне в личку — "
+    "спрошу название, сезон, серию и озвучку по шагам.\n\n"
+    "<b>Короткие формы подписи тоже понимаю:</b>\n"
+    "<code>Моё Аниме | 2 | 7 | Studio Band</code>\n"
+    "<code>Моё Аниме S02E07 [Studio Band]</code>\n"
+    "<code>Моё Аниме - 7 серия (AniLibria)</code>"
+)
