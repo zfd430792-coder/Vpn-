@@ -45,7 +45,7 @@ async def _ingest(message: Message, db: Database, cfg: Config, bot: Bot) -> None
             f"<code>{message.message_id}</code> в хранилище.\n\n"
             "Нужен один из форматов:\n"
             "<code>Название | сезон | серия | озвучка</code>\n"
-            "<code>Название S01E07 [Озвучка]</code>\n"
+            "<code>Название S01E07 [Озвучка] [4K]</code>\n"
             "или построчно <code>Название:/Сезон:/Серия:/Озвучка:</code>\n\n"
             "Поправь подпись — я подхвачу сам.",
         )
@@ -57,12 +57,18 @@ async def _ingest(message: Message, db: Database, cfg: Config, bot: Bot) -> None
         season=parsed.season,
         number=parsed.episode,
         dub=parsed.dub,
+        quality=parsed.quality,
         message_id=message.message_id,
         file_size=getattr(media, "file_size", 0) or 0,
         duration=getattr(media, "duration", 0) or 0,
     )
     log.info("Из канала: %s", parsed)
-    await _notify(bot, cfg, f"✅ В каталоге: <b>{parsed.title}</b>\nS{parsed.season} · E{parsed.episode} · {parsed.dub}")
+    await _notify(
+        bot,
+        cfg,
+        f"✅ В каталоге: <b>{parsed.title}</b>\n"
+        f"S{parsed.season} · E{parsed.episode} · {parsed.dub} · {parsed.quality_name}",
+    )
 
 
 @router.channel_post(F.video | F.document | F.animation)

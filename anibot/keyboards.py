@@ -55,7 +55,7 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
     kb.row(_nav("🔍 Поиск", "search"), _nav("📚 Каталог", "catalog"))
     kb.row(_nav("🔥 Популярное", "popular"), _nav("💡 Предложить", "suggest"))
     kb.row(_nav("⭐ Подписка", "subs"), _nav("👤 Профиль", "profile"))
-    kb.row(_nav("❓ Помощь", "help"))
+    kb.row(_nav("💬 Поддержка", "support"), _nav("❓ Помощь", "help"))
     if is_admin:
         kb.row(_nav("⚙️ Админка", "admin"))
     return kb.as_markup()
@@ -119,9 +119,10 @@ def episodes(
 
 
 def dubs(anime_id: int, season: int, number: int, variants: list[Episode]) -> InlineKeyboardMarkup:
+    """По одной строке на озвучку. В variants — представитель каждой озвучки."""
     kb = InlineKeyboardBuilder()
     for ep in variants:
-        kb.row(_nav(f"🎙 {ep.dub}"[:60], "watch", i=ep.id))
+        kb.row(_nav(f"🎙 {ep.dub}"[:60], "dub", i=ep.id))
     kb.row(
         _nav("⬅️ К сериям", "season", i=anime_id, s=season),
         _nav("🏠 В меню", "menu"),
@@ -129,8 +130,26 @@ def dubs(anime_id: int, season: int, number: int, variants: list[Episode]) -> In
     return kb.as_markup()
 
 
+def qualities(variants: list[Episode], anime_id: int, season: int, number: int) -> InlineKeyboardMarkup:
+    """Выбор качества внутри выбранной озвучки. Лучшее — сверху."""
+    kb = InlineKeyboardBuilder()
+    for ep in variants:
+        mark = "💎" if ep.quality >= 2160 else "🎬"
+        size = f" · {ep.file_size / 1024 ** 3:.1f} ГБ" if ep.file_size else ""
+        kb.row(_nav(f"{mark} {ep.quality_name}{size}", "watch", i=ep.id))
+    kb.row(
+        _nav("⬅️ К озвучкам", "ep", i=anime_id, s=season, e=number),
+        _nav("🏠 В меню", "menu"),
+    )
+    return kb.as_markup()
+
+
 def player(
-    ep: Episode, has_prev: bool, has_next: bool, dub_count: int
+    ep: Episode,
+    has_prev: bool,
+    has_next: bool,
+    dub_count: int,
+    quality_count: int = 1,
 ) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     row: list[InlineKeyboardButton] = []
@@ -143,8 +162,11 @@ def player(
     bottom = []
     if dub_count > 1:
         bottom.append(_nav("🎚 Озвучка", "ep", i=ep.anime_id, s=ep.season, e=ep.number))
-    bottom.append(_nav("📋 Все серии", "season", i=ep.anime_id, s=ep.season))
-    kb.row(*bottom)
+    if quality_count > 1:
+        bottom.append(_nav("💎 Качество", "dub", i=ep.id))
+    if bottom:
+        kb.row(*bottom)
+    kb.row(_nav("📋 Все серии", "season", i=ep.anime_id, s=ep.season))
     kb.row(_nav("🏠 В меню", "menu"))
     return kb.as_markup()
 

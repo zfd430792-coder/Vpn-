@@ -132,7 +132,9 @@ async def nav_new(
     await show(call, t.SUGGEST_NEW.format(title=raw) + "\n\n" + board, markup)
 
 
-@router.message(SuggestFSM.waiting, F.text & ~F.text.startswith("/"))
+@router.message(
+    SuggestFSM.waiting, F.chat.type == "private", F.text & ~F.text.startswith("/")
+)
 async def got_text(
     message: Message, db: Database, cfg: Config, state: FSMContext
 ):

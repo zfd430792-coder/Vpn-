@@ -130,6 +130,7 @@ def load() -> Config:
             "payments": _target("LOG_PAYMENTS"),
             "stats": _target("LOG_STATS"),
             "logs": _target("LOG_ERRORS"),
+            "support": _target("LOG_SUPPORT"),
         },
     )
     cfg.data_dir.mkdir(parents=True, exist_ok=True)

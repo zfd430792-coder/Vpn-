@@ -231,7 +231,9 @@ async def make_service_chats(
         return {}
 
     say(f"Служебная группа создана ({group_id})")
-    env: dict[str, str] = {"SERVICE_GROUP": str(group_id)}
+    # поддержка заводит тему на каждого обратившегося сама, поэтому тут
+    # хранится только группа, без номера темы
+    env: dict[str, str] = {"SERVICE_GROUP": str(group_id), "LOG_SUPPORT": str(group_id)}
 
     if not forum:
         say("темы Telegram не дал — всё служебное пойдёт в общий чат группы")
@@ -310,6 +312,8 @@ async def run() -> None:
 
   Хранилище:        {C_ASK}{channel_id}{C_OFF}
   Служебная группа: {C_ASK}{updates.get('SERVICE_GROUP', '—')}{C_OFF}
+  {C_DIM}Темы: предложения, платежи, статистика, логи.
+  Обращения в поддержку заводят свою тему на каждого человека.{C_OFF}
 
   {C_DIM}Заливай серии в хранилище с подписью:{C_OFF}
       Название: Моё Аниме

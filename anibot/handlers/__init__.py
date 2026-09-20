@@ -8,13 +8,15 @@ from __future__ import annotations
 
 from aiogram import Dispatcher
 
-from . import admin, catalog, channel, start, subscription, suggestions, watch
+from . import (admin, catalog, channel, start, subscription, suggestions,
+               support, watch)
 
 
 def setup(dp: Dispatcher) -> None:
     dp.include_router(admin.router)
     dp.include_router(subscription.router)
     dp.include_router(start.router)
+    dp.include_router(support.router)
     dp.include_router(suggestions.router)
     dp.include_router(watch.router)
     dp.include_router(catalog.router)

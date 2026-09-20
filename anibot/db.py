@@ -28,11 +28,12 @@ CREATE TABLE IF NOT EXISTS episode (
     season     INTEGER NOT NULL DEFAULT 1,
     number     INTEGER NOT NULL,
     dub        TEXT    NOT NULL,
+    quality    INTEGER NOT NULL DEFAULT 1080,
     message_id INTEGER NOT NULL,
     file_size  INTEGER NOT NULL DEFAULT 0,
     duration   INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
-    UNIQUE(anime_id, season, number, dub)
+    UNIQUE(anime_id, season, number, dub, quality)
 );
 CREATE INDEX IF NOT EXISTS idx_ep_anime ON episode(anime_id, season, number);
 
@@ -62,6 +63,15 @@ CREATE TABLE IF NOT EXISTS payment (
     ts        INTEGER NOT NULL,
     refunded  INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS ticket (
+    user_id    INTEGER PRIMARY KEY,
+    thread_id  INTEGER NOT NULL DEFAULT 0,   -- тема в служебной группе
+    status     TEXT    NOT NULL DEFAULT 'open',
+    created_at INTEGER NOT NULL,
+    last_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_thread ON ticket(thread_id);
 
 CREATE TABLE IF NOT EXISTS setting (
     key   TEXT PRIMARY KEY,
@@ -140,6 +150,11 @@ class Episode:
     message_id: int
     file_size: int = 0
     duration: int = 0
+    quality: int = 1080
+
+    @property
+    def quality_name(self) -> str:
+        return {1080: "1080p", 2160: "4K"}.get(self.quality, f"{self.quality}p")
 
 
 def now() -> int:
@@ -161,8 +176,51 @@ class Database:
         await self._db.commit()
         await self._migrate()
 
+    async def _migrate_episode(self) -> None:
+        """Добавляет качество в серии.
+
+        Уникальность раньше не учитывала качество, а в SQLite ограничение
+        так просто не снять — поэтому таблица пересобирается с переносом
+        данных. Всё, что было залито раньше, считается 1080p.
+        """
+        async with self.db.execute("PRAGMA table_info(episode)") as cur:
+            columns = {row["name"] for row in await cur.fetchall()}
+        if not columns or "quality" in columns:
+            return
+
+        await self.db.executescript(
+            """
+            PRAGMA foreign_keys=OFF;
+            ALTER TABLE episode RENAME TO episode_old;
+            CREATE TABLE episode (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                anime_id   INTEGER NOT NULL REFERENCES anime(id) ON DELETE CASCADE,
+                season     INTEGER NOT NULL DEFAULT 1,
+                number     INTEGER NOT NULL,
+                dub        TEXT    NOT NULL,
+                quality    INTEGER NOT NULL DEFAULT 1080,
+                message_id INTEGER NOT NULL,
+                file_size  INTEGER NOT NULL DEFAULT 0,
+                duration   INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                UNIQUE(anime_id, season, number, dub, quality)
+            );
+            INSERT INTO episode
+                (id, anime_id, season, number, dub, quality,
+                 message_id, file_size, duration, created_at)
+            SELECT id, anime_id, season, number, dub, 1080,
+                   message_id, file_size, duration, created_at
+            FROM episode_old;
+            DROP TABLE episode_old;
+            CREATE INDEX IF NOT EXISTS idx_ep_anime ON episode(anime_id, season, number);
+            PRAGMA foreign_keys=ON;
+            """
+        )
+        await self.db.commit()
+
     async def _migrate(self) -> None:
         """Дописывает колонки, которых нет в уже существующей базе."""
+        await self._migrate_episode()
         for table, columns in MIGRATIONS.items():
             async with self.db.execute(f"PRAGMA table_info({table})") as cur:
                 have = {row["name"] for row in await cur.fetchall()}
@@ -226,10 +284,25 @@ class Database:
             (user_id, username, name, ts, ts),
         )
 
+    async def ensure_user(self, user_id: int) -> None:
+        """Заводит строку пользователя, если её ещё нет.
+
+        Нужно перед любым UPDATE по id: подписку, бан или скидку могут
+        выдать человеку, который ещё ни разу не нажимал /start, и тогда
+        UPDATE тихо задел бы ноль строк.
+        """
+        ts = now()
+        await self._exec(
+            "INSERT OR IGNORE INTO tg_user(id, username, name, joined_at, seen_at) "
+            "VALUES(?, NULL, NULL, ?, ?)",
+            (user_id, ts, ts),
+        )
+
     async def get_user(self, user_id: int) -> Optional[aiosqlite.Row]:
         return await self._fetchone("SELECT * FROM tg_user WHERE id = ?", (user_id,))
 
     async def set_banned(self, user_id: int, banned: bool) -> None:
+        await self.ensure_user(user_id)
         await self._exec("UPDATE tg_user SET banned = ? WHERE id = ?", (int(banned), user_id))
 
     async def is_banned(self, user_id: int) -> bool:
@@ -251,6 +324,7 @@ class Database:
 
     async def grant_sub(self, user_id: int, days: int) -> int:
         """Продлевает подписку от текущего конца (или от сейчас). Возвращает новый конец."""
+        await self.ensure_user(user_id)
         current = max(await self.sub_until(user_id), now())
         until = current + days * 86400
         await self._exec("UPDATE tg_user SET sub_until = ? WHERE id = ?", (until, user_id))
@@ -367,19 +441,21 @@ class Database:
         message_id: int,
         file_size: int = 0,
         duration: int = 0,
+        quality: int = 1080,
     ) -> int:
         """Вставляет или обновляет серию. Возвращает id строки."""
         await self._exec(
-            "INSERT INTO episode(anime_id, season, number, dub, message_id, file_size, "
-            "duration, created_at) VALUES(?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(anime_id, season, number, dub) DO UPDATE SET "
+            "INSERT INTO episode(anime_id, season, number, dub, quality, message_id, "
+            "file_size, duration, created_at) VALUES(?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(anime_id, season, number, dub, quality) DO UPDATE SET "
             "message_id=excluded.message_id, file_size=excluded.file_size, "
             "duration=excluded.duration",
-            (anime_id, season, number, dub, message_id, file_size, duration, now()),
+            (anime_id, season, number, dub, quality, message_id, file_size, duration, now()),
         )
         row = await self._fetchone(
-            "SELECT id FROM episode WHERE anime_id=? AND season=? AND number=? AND dub=?",
-            (anime_id, season, number, dub),
+            "SELECT id FROM episode WHERE anime_id=? AND season=? AND number=? "
+            "AND dub=? AND quality=?",
+            (anime_id, season, number, dub, quality),
         )
         return int(row["id"]) if row else 0
 
@@ -387,6 +463,7 @@ class Database:
         return Episode(
             row["id"], row["anime_id"], row["season"], row["number"],
             row["dub"], row["message_id"], row["file_size"], row["duration"],
+            row["quality"] if "quality" in row.keys() else 1080,
         )
 
     async def get_episode(self, episode_id: int) -> Optional[Episode]:
@@ -410,20 +487,55 @@ class Database:
         )
         return [int(r["number"]) for r in rows]
 
+    async def dub_names(self, anime_id: int, season: int, number: int) -> list[str]:
+        """Названия озвучек для серии, по одному разу на озвучку."""
+        rows = await self._fetchall(
+            "SELECT DISTINCT dub FROM episode WHERE anime_id=? AND season=? AND number=? "
+            "ORDER BY dub COLLATE NOCASE",
+            (anime_id, season, number),
+        )
+        return [r["dub"] for r in rows]
+
+    async def qualities(
+        self, anime_id: int, season: int, number: int, dub: str
+    ) -> list[Episode]:
+        """Доступные качества для конкретной озвучки. Лучшее — первым."""
+        rows = await self._fetchall(
+            "SELECT * FROM episode WHERE anime_id=? AND season=? AND number=? AND dub=? "
+            "ORDER BY quality DESC",
+            (anime_id, season, number, dub),
+        )
+        return [self._ep(r) for r in rows]
+
     async def dubs(self, anime_id: int, season: int, number: int) -> list[Episode]:
+        """Все строки серии (озвучка × качество)."""
         rows = await self._fetchall(
             "SELECT * FROM episode WHERE anime_id=? AND season=? AND number=? "
-            "ORDER BY dub COLLATE NOCASE",
+            "ORDER BY dub COLLATE NOCASE, quality DESC",
             (anime_id, season, number),
         )
         return [self._ep(r) for r in rows]
 
     async def find_episode(
-        self, anime_id: int, season: int, number: int, dub: str
+        self,
+        anime_id: int,
+        season: int,
+        number: int,
+        dub: str,
+        quality: int | None = None,
     ) -> Optional[Episode]:
-        """Ищет серию в нужной озвучке, иначе — любую доступную."""
+        """Ищет серию в нужной озвучке и качестве, иначе — ближайшее доступное."""
+        if quality is not None:
+            row = await self._fetchone(
+                "SELECT * FROM episode WHERE anime_id=? AND season=? AND number=? "
+                "AND dub=? AND quality=?",
+                (anime_id, season, number, dub, quality),
+            )
+            if row:
+                return self._ep(row)
         row = await self._fetchone(
-            "SELECT * FROM episode WHERE anime_id=? AND season=? AND number=? AND dub=?",
+            "SELECT * FROM episode WHERE anime_id=? AND season=? AND number=? AND dub=? "
+            "ORDER BY quality DESC LIMIT 1",
             (anime_id, season, number, dub),
         )
         if row:
@@ -448,7 +560,9 @@ class Database:
             )
         if not row or row["n"] is None:
             return None
-        return await self.find_episode(ep.anime_id, ep.season, int(row["n"]), ep.dub)
+        return await self.find_episode(
+            ep.anime_id, ep.season, int(row["n"]), ep.dub, ep.quality
+        )
 
     async def count_episodes(self, anime_id: int | None = None) -> int:
         if anime_id is None:
@@ -459,14 +573,61 @@ class Database:
             )
         return int(row["c"]) if row else 0
 
-    async def anime_summary(self, anime_id: int) -> tuple[int, int, list[str]]:
-        """(сезонов, серий, список озвучек)"""
+    async def anime_summary(self, anime_id: int) -> tuple[int, int, list[str], list[int]]:
+        """(сезонов, строк, список озвучек, список качеств)"""
         seasons = await self.seasons(anime_id)
         total = await self.count_episodes(anime_id)
         rows = await self._fetchall(
             "SELECT DISTINCT dub FROM episode WHERE anime_id = ? ORDER BY dub", (anime_id,)
         )
-        return len(seasons), total, [r["dub"] for r in rows]
+        qrows = await self._fetchall(
+            "SELECT DISTINCT quality FROM episode WHERE anime_id = ? ORDER BY quality DESC",
+            (anime_id,),
+        )
+        return len(seasons), total, [r["dub"] for r in rows], [int(q["quality"]) for q in qrows]
+
+    # ---------- поддержка ----------
+
+    async def ensure_ticket(self, user_id: int, thread_id: int = 0) -> aiosqlite.Row:
+        """Обращение пользователя. Создаёт, если его ещё не было."""
+        row = await self._fetchone("SELECT * FROM ticket WHERE user_id = ?", (user_id,))
+        if row is None:
+            await self._exec(
+                "INSERT INTO ticket(user_id, thread_id, created_at, last_at) VALUES(?,?,?,?)",
+                (user_id, thread_id, now(), now()),
+            )
+            row = await self._fetchone("SELECT * FROM ticket WHERE user_id = ?", (user_id,))
+        elif thread_id and not row["thread_id"]:
+            await self._exec(
+                "UPDATE ticket SET thread_id = ? WHERE user_id = ?", (thread_id, user_id)
+            )
+            row = await self._fetchone("SELECT * FROM ticket WHERE user_id = ?", (user_id,))
+        return row
+
+    async def set_ticket_thread(self, user_id: int, thread_id: int) -> None:
+        await self._exec(
+            "UPDATE ticket SET thread_id = ?, status = 'open', last_at = ? WHERE user_id = ?",
+            (thread_id, now(), user_id),
+        )
+
+    async def ticket_by_thread(self, thread_id: int) -> Optional[aiosqlite.Row]:
+        return await self._fetchone(
+            "SELECT * FROM ticket WHERE thread_id = ? LIMIT 1", (thread_id,)
+        )
+
+    async def touch_ticket(self, user_id: int) -> None:
+        await self._exec(
+            "UPDATE ticket SET last_at = ?, status = 'open' WHERE user_id = ?",
+            (now(), user_id),
+        )
+
+    async def close_ticket(self, user_id: int) -> None:
+        await self._exec("UPDATE ticket SET status = 'closed' WHERE user_id = ?", (user_id,))
+
+    async def open_tickets(self) -> list[aiosqlite.Row]:
+        return await self._fetchall(
+            "SELECT * FROM ticket WHERE status = 'open' ORDER BY last_at DESC"
+        )
 
     # ---------- тестовая подписка ----------
 
@@ -475,6 +636,7 @@ class Database:
         return bool(row and row["trial_used"])
 
     async def mark_trial_used(self, user_id: int) -> None:
+        await self.ensure_user(user_id)
         await self._exec("UPDATE tg_user SET trial_used = 1 WHERE id = ?", (user_id,))
 
     async def reset_trial(self, user_id: int) -> None:
@@ -483,6 +645,7 @@ class Database:
     # ---------- скидка, лежащая на пользователе ----------
 
     async def set_discount(self, user_id: int, percent: int, promo: str = "") -> None:
+        await self.ensure_user(user_id)
         await self._exec(
             "UPDATE tg_user SET discount = ?, discount_promo = ? WHERE id = ?",
             (percent, promo, user_id),

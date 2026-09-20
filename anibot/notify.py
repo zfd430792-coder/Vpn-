@@ -24,6 +24,7 @@ SUGGESTIONS = "suggestions"
 PAYMENTS = "payments"
 STATS = "stats"
 LOGS = "logs"
+SUPPORT = "support"
 
 HEARTBEAT_KEY = "last_seen"
 HEARTBEAT_EVERY = 60  # секунд

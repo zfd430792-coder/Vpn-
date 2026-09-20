@@ -45,6 +45,7 @@ class AdminFSM(StatesGroup):
     up_season = State()
     up_episode = State()
     up_dub = State()
+    up_quality = State()
 
 
 def _admin_only(cfg: Config, user_id: int) -> bool:
@@ -120,12 +121,13 @@ async def adm_title(call: CallbackQuery, callback_data: kb.Adm, db: Database, cf
     if anime is None:
         await show(call, "🤷 Тайтл не найден.", kb.admin_cancel())
         return
-    seasons, episodes, dubs = await db.anime_summary(anime.id)
+    seasons, episodes, dubs, quals = await db.anime_summary(anime.id)
     text = (
         f"🎬 <b>{anime.title}</b>\n{t.SEP}\n"
         f"🆔 <code>{anime.id}</code>\n"
         f"📀 Сезонов: <b>{seasons}</b>  ·  🎞 Серий: <b>{episodes}</b>\n"
-        f"🎙 Озвучки: {', '.join(dubs) or '—'}"
+        f"🎙 Озвучки: {', '.join(dubs) or '—'}\n"
+        f"💎 Качество: {', '.join(parser.QUALITY_NAMES.get(q, str(q)) for q in quals) or '—'}"
     )
     await show(call, text, kb.admin_title(anime.id))
 
@@ -245,14 +247,32 @@ async def adm_up_episode(message: Message, state: FSMContext):
 
 
 @router.message(AdminFSM.up_dub)
-async def adm_up_dub(message: Message, db: Database, cfg: Config, state: FSMContext, bot: Bot):
+async def adm_up_dub(message: Message, state: FSMContext):
     dub = (message.text or "").strip() or parser.DEFAULT_DUB
+    await state.update_data(dub=dub)
+    await state.set_state(AdminFSM.up_quality)
+    await message.answer(
+        "💎 Качество? Пришли <code>1080</code> или <code>4k</code>.\n"
+        "<i>Просто Enter или «-» — будет 1080p.</i>"
+    )
+
+
+@router.message(AdminFSM.up_quality)
+async def adm_up_quality(
+    message: Message, db: Database, cfg: Config, state: FSMContext, bot: Bot
+):
+    raw = (message.text or "").strip()
+    quality, _rest = parser.quality_of(raw) if raw not in {"-", ""} else (
+        parser.DEFAULT_QUALITY,
+        "",
+    )
     data = await state.get_data()
     parsed = parser.Parsed(
         title=data.get("title", "Без названия"),
         season=data.get("season", 1),
         episode=data.get("number", 1),
-        dub=dub,
+        dub=data.get("dub", parser.DEFAULT_DUB),
+        quality=quality,
     )
     await _save_upload(message, db, cfg, state, bot, parsed)
 
@@ -279,7 +299,8 @@ async def _save_upload(
         f"Название: {parsed.title}\n"
         f"Сезон: {parsed.season}\n"
         f"Серия: {parsed.episode}\n"
-        f"Озвучка: {parsed.dub}"
+        f"Озвучка: {parsed.dub}\n"
+        f"Качество: {parsed.quality_name}"
     )
     try:
         copied = await bot.copy_message(
@@ -299,6 +320,7 @@ async def _save_upload(
         season=parsed.season,
         number=parsed.episode,
         dub=parsed.dub,
+        quality=parsed.quality,
         message_id=copied.message_id,
         file_size=data.get("size", 0),
         duration=data.get("duration", 0),
@@ -308,7 +330,7 @@ async def _save_upload(
         f"✅ <b>Сохранено</b>\n{t.SEP}\n"
         f"🎬 {parsed.title}\n"
         f"📀 Сезон {parsed.season} · 🎞 Серия {parsed.episode}\n"
-        f"🎙 {parsed.dub}",
+        f"🎙 {parsed.dub} · 💎 {parsed.quality_name}",
         reply_markup=kb.admin_panel(),
     )
 

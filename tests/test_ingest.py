@@ -119,19 +119,34 @@ async def main():
         check("ссылается на message_id поста", ep and ep.message_id == 301, ep and ep.message_id)
         check("размер файла сохранён", ep and ep.file_size == 1_600_000_000)
         check("длительность сохранена", ep and ep.duration == 1450)
+        check("без метки качества — 1080p", ep and ep.quality == 1080, ep and ep.quality)
         check("админу пришло подтверждение",
               any("В каталоге" in t for t in session.texts()), session.texts())
 
+    print("\n[1б] Качество из подписи")
+    if await feed(channel_post("Тайтл Альфа | 1 | 4 | Studio Band | 4K", 310), "пост с 4K"):
+        alpha = (await db.search_anime(se.normalize("тайтл альфа")))[0]
+        variants = await db.qualities(alpha.id, 1, 4, "Studio Band")
+        check("рядом с 1080 легло 4K, а не заменило его", len(variants) == 2,
+              [(v.quality_name, v.message_id) for v in variants])
+        check("лучшее качество первым", variants and variants[0].quality == 2160)
+        names = await db.dub_names(alpha.id, 1, 4)
+        check("озвучка в списке одна", names == ["Studio Band"], names)
+
     print("\n[2] Пост с непонятной подписью")
+    before = await db.count_episodes()
     if await feed(channel_post("чё качать-то", 302), "мусорная подпись"):
-        check("в каталог не попало", await db.count_episodes() == 1)
+        check("в каталог не попало", await db.count_episodes() == before,
+              (before, await db.count_episodes()))
         check("админа предупредили",
               any("Не разобрал" in t for t in session.texts()), session.texts())
 
     print("\n[3] Пост из чужого канала игнорируется")
     other = Chat(id=-1009999999999, type="channel", title="Чужой")
+    titles_before = await db.count_anime()
     if await feed(channel_post("Левый Тайтл | 1 | 1 | Кто-то", 303, chat=other), "чужой канал"):
-        check("чужое не подхватывается", await db.count_anime() == 1, await db.count_anime())
+        check("чужое не подхватывается", await db.count_anime() == titles_before,
+              await db.count_anime())
 
     print("\n[4] Правка подписи перечитывается")
     edited = Update(update_id=1, edited_channel_post=Message(
@@ -139,8 +154,10 @@ async def main():
         caption="Тайтл Бета | 1 | 1 | AniLibria",
     ))
     if await feed(edited, "правка подписи"):
-        check("после правки серия появилась", await db.count_episodes() == 2, await db.count_episodes())
-        check("второй тайтл заведён", await db.count_anime() == 2)
+        check("после правки серия появилась", await db.count_episodes() == before + 1,
+              (before, await db.count_episodes()))
+        check("второй тайтл заведён", await db.count_anime() == titles_before + 1,
+              await db.count_anime())
 
     print("\n[5] Админ прислал видео с подписью в личку")
     if await feed(dm_video("Тайтл Гамма | 2 | 9 | Studio Band"), "видео с подписью"):
@@ -164,11 +181,14 @@ async def main():
     if await feed(dm_text("12"), "шаг: серия"):
         check("спросил озвучку", any("Озвучка" in t for t in session.texts()))
     if await feed(dm_text("AniLibria"), "шаг: озвучка"):
+        check("спросил качество", any("Качество" in t for t in session.texts()), session.texts())
+    if await feed(dm_text("4k"), "шаг: качество"):
         delta = await db.search_anime(se.normalize("тайтл дельта"))
         check("тайтл создан по шагам", len(delta) == 1, len(delta))
         if delta:
             ep = await db.find_episode(delta[0].id, 3, 12, "AniLibria")
             check("серия создана по шагам", ep is not None)
+            check("качество 4K сохранено", ep and ep.quality == 2160, ep and ep.quality)
         check("видео скопировано в канал", session.last("CopyMessage") is not None)
 
     print("\n[7] Обычный юзер видео залить не может")

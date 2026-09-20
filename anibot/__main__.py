@@ -23,6 +23,7 @@ log = logging.getLogger("anibot")
 COMMANDS = [
     BotCommand(command="start", description="🏠 Главное меню"),
     BotCommand(command="help", description="❓ Как пользоваться"),
+    BotCommand(command="support", description="💬 Написать в поддержку"),
     BotCommand(command="id", description="🆔 Мой ID"),
 ]
 

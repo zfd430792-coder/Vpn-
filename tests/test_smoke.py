@@ -30,7 +30,8 @@ async def main():
     handlers.setup(dp)
     names = [r.name for r in dp.sub_routers]
     check("роутеры подключены в нужном порядке",
-          names == ["admin", "subscription", "start", "suggestions", "watch", "catalog", "channel"], names)
+          names == ["admin", "subscription", "start", "support", "suggestions",
+                    "watch", "catalog", "channel"], names)
     used = dp.resolve_used_update_types()
     check("бот слушает channel_post", "channel_post" in used, used)
     check("бот слушает pre_checkout_query", "pre_checkout_query" in used, used)
@@ -109,6 +110,7 @@ async def main():
         "плеер": kb.player(ep, True, True, 2), "подписка": kb.subscription(plans, False),
         "админка": kb.admin_panel(), "тайтлы": kb.admin_titles(everything, 0, 2),
         "настройки": kb.admin_settings(True, 3, True, 0), "цены": kb.admin_prices(plans),
+        "качества": kb.qualities(dubs, alpha.id, 1, 2),
     }
     worst = 0
     for name, markup in markups.items():

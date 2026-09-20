@@ -73,7 +73,8 @@ async def deliver(
     Основной путь — copy_message из канала: файл не перезаливается,
     ограничения по размеру нет. Если бот не смог — пробует юзербот.
     """
-    dub_count = len(await db.dubs(ep.anime_id, ep.season, ep.number))
+    dub_count = len(await db.dub_names(ep.anime_id, ep.season, ep.number))
+    quality_count = len(await db.qualities(ep.anime_id, ep.season, ep.number, ep.dub))
     has_prev = await db.neighbour(ep, -1) is not None
     has_next = await db.neighbour(ep, +1) is not None
 
@@ -82,6 +83,7 @@ async def deliver(
         season=ep.season,
         number=ep.number,
         dub=ep.dub,
+        quality=ep.quality_name,
         size=t.human_size(ep.file_size),
         duration=t.human_duration(ep.duration),
     )
@@ -97,7 +99,7 @@ async def deliver(
                 message_id=ep.message_id,
                 caption=caption,
                 protect_content=protect,
-                reply_markup=kb.player(ep, has_prev, has_next, dub_count),
+                reply_markup=kb.player(ep, has_prev, has_next, dub_count, quality_count),
             )
         except TelegramAPIError as exc:
             log.warning("copy_message не прошёл (ep=%s): %s", ep.id, exc)
@@ -108,7 +110,11 @@ async def deliver(
             return False
         with contextlib.suppress(TelegramAPIError):
             await bot.send_message(
-                user_id, caption, reply_markup=kb.player(ep, has_prev, has_next, dub_count)
+                user_id,
+                caption,
+                reply_markup=kb.player(
+                    ep, has_prev, has_next, dub_count, quality_count
+                ),
             )
 
     await db.add_view(user_id, ep.id)

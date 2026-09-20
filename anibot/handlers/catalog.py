@@ -22,12 +22,13 @@ async def _anime_card(db: Database, anime_id: int) -> tuple[str, list[int]] | No
     anime = await db.get_anime(anime_id)
     if anime is None:
         return None
-    seasons, episodes, dubs = await db.anime_summary(anime_id)
+    seasons, episodes, dubs, quals = await db.anime_summary(anime_id)
     text = t.ANIME_CARD.format(
         title=anime.title,
         seasons=seasons or 1,
         episodes=episodes,
         dubs=", ".join(dubs) if dubs else "—",
+        quality=", ".join({1080: "1080p", 2160: "4K"}.get(q, f"{q}p") for q in quals) or "—",
     )
     return text, await db.seasons(anime_id)
 
@@ -78,7 +79,9 @@ async def nav_search_page(
     await show(call, text, kb.anime_list(items, page, pages, "sr"))
 
 
-@router.message(StateFilter(None), F.text & ~F.text.startswith("/"))
+@router.message(
+    StateFilter(None), F.chat.type == "private", F.text & ~F.text.startswith("/")
+)
 async def search_text(message: Message, db: Database, state: FSMContext):
     query = (message.text or "").strip()
     if len(query) < 2:
@@ -156,7 +159,36 @@ async def nav_season(call: CallbackQuery, callback_data: kb.Nav, db: Database):
 
 @router.callback_query(kb.Nav.filter(F.to == "ep"))
 async def nav_episode(call: CallbackQuery, callback_data: kb.Nav, db: Database, **kwargs):
-    variants = await db.dubs(callback_data.i, callback_data.s, callback_data.e)
+    """Шаг выбора озвучки. Одна озвучка — сразу к качеству."""
+    names = await db.dub_names(callback_data.i, callback_data.s, callback_data.e)
+    if not names:
+        await show(call, "📭 Этой серии нет.", kb.back_to())
+        return
+
+    # представитель каждой озвучки — по нему дальше берём список качеств
+    reps = []
+    for name in names:
+        variants = await db.qualities(callback_data.i, callback_data.s, callback_data.e, name)
+        if variants:
+            reps.append(variants[0])
+
+    if len(reps) == 1:
+        await _show_qualities(call, db, reps[0], **kwargs)
+        return
+
+    anime = await db.get_anime(callback_data.i)
+    title = anime.title if anime else "—"
+    text = (
+        f"🎬 <b>{title}</b>\n{t.SEP}\n"
+        f"📀 Сезон {callback_data.s} · Серия {callback_data.e}\n\n"
+        "🎙 Выбери озвучку:"
+    )
+    await show(call, text, kb.dubs(callback_data.i, callback_data.s, callback_data.e, reps))
+
+
+async def _show_qualities(call: CallbackQuery, db: Database, ep, **kwargs) -> None:
+    """Шаг выбора качества. Качество одно — отдаём серию без лишнего вопроса."""
+    variants = await db.qualities(ep.anime_id, ep.season, ep.number, ep.dub)
     if not variants:
         await show(call, "📭 Этой серии нет.", kb.back_to())
         return
@@ -167,11 +199,21 @@ async def nav_episode(call: CallbackQuery, callback_data: kb.Nav, db: Database, 
         await send_episode(call, variants[0], db=db, **kwargs)
         return
 
-    anime = await db.get_anime(callback_data.i)
+    anime = await db.get_anime(ep.anime_id)
     title = anime.title if anime else "—"
     text = (
         f"🎬 <b>{title}</b>\n{t.SEP}\n"
-        f"📀 Сезон {callback_data.s} · Серия {callback_data.e}\n\n"
-        "🎙 Выбери озвучку:"
+        f"📀 Сезон {ep.season} · Серия {ep.number}\n"
+        f"🎙 {ep.dub}\n\n"
+        "💎 Выбери качество:"
     )
-    await show(call, text, kb.dubs(callback_data.i, callback_data.s, callback_data.e, variants))
+    await show(call, text, kb.qualities(variants, ep.anime_id, ep.season, ep.number))
+
+
+@router.callback_query(kb.Nav.filter(F.to == "dub"))
+async def nav_dub(call: CallbackQuery, callback_data: kb.Nav, db: Database, **kwargs):
+    ep = await db.get_episode(callback_data.i)
+    if ep is None:
+        await show(call, "📭 Серия не найдена.", kb.back_to())
+        return
+    await _show_qualities(call, db, ep, **kwargs)
