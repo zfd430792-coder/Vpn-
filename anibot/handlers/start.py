@@ -71,7 +71,7 @@ async def nav_profile(call: CallbackQuery, db: Database, cfg: Config):
         user_id=user_id,
         sub=t.human_until(until),
         views=await db.views_count(user_id),
-        quota=await service.quota_line(db, cfg, user_id),
+        quota=await service.status_line(db, cfg, user_id),
     )
     await show(call, text, kb.back_to())
 

@@ -96,11 +96,12 @@ def check(label, cond, extra=""):
 async def main():
     cfg = config.Config(
         bot_token="1:x", admins={777}, storage_channel=-1001234567890,
-        data_dir=Path(os.environ["DATA_DIR"]), free_episodes=1,
+        data_dir=Path(os.environ["DATA_DIR"]),
     )
     db = Database(cfg.db_path)
     await db.connect()
-    await db.set_setting("free_episodes", "1")
+    await db.set_setting("trial_enabled", "1")
+    await db.set_setting("trial_days", "3")
 
     # наполняем каталог
     for cap, mid in [
@@ -151,9 +152,22 @@ async def main():
         check("две озвучки — спросил, какую",
               edited and "озвучку" in edited["text"].lower(), edited and edited["text"][:60])
 
-    print("\n[4] Выдача серии")
+    print("\n[4] Без подписки — пейволл с предложением теста")
     ep = await db.find_episode(alpha.id, 1, 1, "Studio Band")
-    if await feed(cb(kb.Nav(to="watch", i=ep.id).pack()), "смотреть"):
+    if await feed(cb(kb.Nav(to="watch", i=ep.id).pack()), "смотреть без подписки"):
+        edited = session.last("EditMessageText")
+        check("упёрлись в пейволл", edited and "подписка" in edited["text"].lower(),
+              edited and edited["text"][:70])
+        check("видео не ушло", session.last("CopyMessage") is None)
+        buttons = [b["text"] for row in (edited or {}).get("reply_markup", {}).get(
+            "inline_keyboard", []) for b in row]
+        check("предложена тестовая подписка", any("Включить тест" in b for b in buttons), buttons)
+        check("предложен промокод", any("промокод" in b.lower() for b in buttons), buttons)
+
+    print("\n[5] Тестовая подписка открывает доступ")
+    if await feed(cb(kb.Nav(to="trial").pack()), "включить тест"):
+        check("тест включён", await db.has_sub(USER.id))
+    if await feed(cb(kb.Nav(to="watch", i=ep.id).pack()), "смотреть после теста"):
         copied = session.last("CopyMessage")
         check("серия отправлена через copy_message", copied is not None)
         check("копия берётся из канала-хранилища",
@@ -162,14 +176,12 @@ async def main():
               copied and "Тайтл Альфа" in copied["caption"] and "Studio Band" in copied["caption"])
         check("включена защита от пересылки", copied and copied.get("protect_content") is True)
         check("просмотр записан", await db.views_count(USER.id) == 1)
-
-    print("\n[5] Пейволл после бесплатной квоты")
-    ep2 = await db.find_episode(alpha.id, 1, 2, "Studio Band")
-    if await feed(cb(kb.Nav(to="watch", i=ep2.id).pack()), "вторая серия"):
-        edited = session.last("EditMessageText")
-        check("вторая серия упёрлась в пейволл",
-              edited and "подписка" in edited["text"].lower(), edited and edited["text"][:70])
-        check("видео не ушло", session.last("CopyMessage") is None)
+    await db.revoke_sub(USER.id)
+    if await feed(cb(kb.Nav(to="watch", i=ep.id).pack()), "тест кончился"):
+        check("после теста снова пейволл", session.last("CopyMessage") is None)
+        buttons = [b["text"] for row in (session.last("EditMessageText") or {}).get(
+            "reply_markup", {}).get("inline_keyboard", []) for b in row]
+        check("повторный тест не предлагают", not any("Включить тест" in b for b in buttons), buttons)
 
     print("\n[6] Подписка и счёт в звёздах")
     if await feed(cb(kb.Nav(to="subs").pack()), "витрина подписки"):
@@ -194,7 +206,7 @@ async def main():
     if await feed(paid, "оплата"):
         check("подписка активна", await db.has_sub(USER.id))
         check("платёж записан", (await db.stats())["stars"] == 150, (await db.stats())["stars"])
-    if await feed(cb(kb.Nav(to="watch", i=ep2.id).pack()), "смотреть после оплаты"):
+    if await feed(cb(kb.Nav(to="watch", i=ep.id).pack()), "смотреть после оплаты"):
         check("теперь серия отдаётся", session.last("CopyMessage") is not None)
 
     print("\n[8] Админка")
@@ -228,4 +240,19 @@ async def main():
     print("✅ Все сценарии прошли")
 
 
-asyncio.run(main())
+def _run(coro):
+    """Запуск с жёстким выходом: иначе поток SQLite держит процесс после падения."""
+    import os
+    import traceback
+
+    try:
+        asyncio.run(coro)
+    except SystemExit as exc:
+        os._exit(exc.code or 0)
+    except BaseException:
+        traceback.print_exc()
+        os._exit(1)
+    os._exit(0)
+
+
+_run(main())

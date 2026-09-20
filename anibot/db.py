@@ -67,7 +67,59 @@ CREATE TABLE IF NOT EXISTS setting (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS promo (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    code       TEXT    NOT NULL UNIQUE,
+    kind       TEXT    NOT NULL,              -- 'sub' | 'discount'
+    days       INTEGER NOT NULL DEFAULT 0,    -- для kind='sub'
+    percent    INTEGER NOT NULL DEFAULT 0,    -- для kind='discount'
+    max_uses   INTEGER NOT NULL DEFAULT 0,    -- 0 = без ограничения
+    used       INTEGER NOT NULL DEFAULT 0,
+    expires_at INTEGER NOT NULL DEFAULT 0,    -- 0 = бессрочно
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS promo_use (
+    promo_id INTEGER NOT NULL,
+    user_id  INTEGER NOT NULL,
+    ts       INTEGER NOT NULL,
+    PRIMARY KEY (promo_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS suggestion (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT    NOT NULL,
+    norm       TEXT    NOT NULL,
+    status     TEXT    NOT NULL DEFAULT 'new',   -- new | done | rejected
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sugg_status ON suggestion(status);
+
+CREATE TABLE IF NOT EXISTS suggestion_alias (
+    suggestion_id INTEGER NOT NULL,
+    alias         TEXT    NOT NULL,
+    PRIMARY KEY (suggestion_id, alias)
+);
+CREATE INDEX IF NOT EXISTS idx_alias ON suggestion_alias(alias);
+
+CREATE TABLE IF NOT EXISTS suggestion_vote (
+    suggestion_id INTEGER NOT NULL,
+    user_id       INTEGER NOT NULL,
+    ts            INTEGER NOT NULL,
+    PRIMARY KEY (suggestion_id, user_id)
+);
 """
+
+# Колонки, которые появились после первой версии. SQLite не умеет
+# "ADD COLUMN IF NOT EXISTS", поэтому смотрим, чего не хватает, и дополняем.
+MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "tg_user": [
+        ("trial_used", "INTEGER NOT NULL DEFAULT 0"),
+        ("discount", "INTEGER NOT NULL DEFAULT 0"),
+        ("discount_promo", "TEXT NOT NULL DEFAULT ''"),
+    ],
+}
 
 
 @dataclass
@@ -107,6 +159,17 @@ class Database:
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
         await self._db.commit()
+        await self._migrate()
+
+    async def _migrate(self) -> None:
+        """Дописывает колонки, которых нет в уже существующей базе."""
+        for table, columns in MIGRATIONS.items():
+            async with self.db.execute(f"PRAGMA table_info({table})") as cur:
+                have = {row["name"] for row in await cur.fetchall()}
+            for name, spec in columns:
+                if name not in have:
+                    await self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {spec}")
+        await self.db.commit()
 
     async def close(self) -> None:
         if self._db is not None:
@@ -404,6 +467,177 @@ class Database:
             "SELECT DISTINCT dub FROM episode WHERE anime_id = ? ORDER BY dub", (anime_id,)
         )
         return len(seasons), total, [r["dub"] for r in rows]
+
+    # ---------- тестовая подписка ----------
+
+    async def trial_used(self, user_id: int) -> bool:
+        row = await self._fetchone("SELECT trial_used FROM tg_user WHERE id = ?", (user_id,))
+        return bool(row and row["trial_used"])
+
+    async def mark_trial_used(self, user_id: int) -> None:
+        await self._exec("UPDATE tg_user SET trial_used = 1 WHERE id = ?", (user_id,))
+
+    async def reset_trial(self, user_id: int) -> None:
+        await self._exec("UPDATE tg_user SET trial_used = 0 WHERE id = ?", (user_id,))
+
+    # ---------- скидка, лежащая на пользователе ----------
+
+    async def set_discount(self, user_id: int, percent: int, promo: str = "") -> None:
+        await self._exec(
+            "UPDATE tg_user SET discount = ?, discount_promo = ? WHERE id = ?",
+            (percent, promo, user_id),
+        )
+
+    async def get_discount(self, user_id: int) -> tuple[int, str]:
+        row = await self._fetchone(
+            "SELECT discount, discount_promo FROM tg_user WHERE id = ?", (user_id,)
+        )
+        if not row:
+            return 0, ""
+        return int(row["discount"] or 0), row["discount_promo"] or ""
+
+    async def clear_discount(self, user_id: int) -> None:
+        await self.set_discount(user_id, 0, "")
+
+    # ---------- промокоды ----------
+
+    async def add_promo(
+        self,
+        code: str,
+        kind: str,
+        days: int = 0,
+        percent: int = 0,
+        max_uses: int = 0,
+        expires_at: int = 0,
+    ) -> int:
+        return await self._exec(
+            "INSERT INTO promo(code, kind, days, percent, max_uses, expires_at, created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (code.upper(), kind, days, percent, max_uses, expires_at, now()),
+        )
+
+    async def get_promo(self, code: str) -> Optional[aiosqlite.Row]:
+        return await self._fetchone("SELECT * FROM promo WHERE code = ?", (code.upper(),))
+
+    async def promo_used_by(self, promo_id: int, user_id: int) -> bool:
+        row = await self._fetchone(
+            "SELECT 1 FROM promo_use WHERE promo_id = ? AND user_id = ?", (promo_id, user_id)
+        )
+        return row is not None
+
+    async def use_promo(self, promo_id: int, user_id: int) -> None:
+        await self._exec(
+            "INSERT OR IGNORE INTO promo_use(promo_id, user_id, ts) VALUES(?,?,?)",
+            (promo_id, user_id, now()),
+        )
+        await self._exec("UPDATE promo SET used = used + 1 WHERE id = ?", (promo_id,))
+
+    async def list_promos(self, limit: int = 30) -> list[aiosqlite.Row]:
+        return await self._fetchall("SELECT * FROM promo ORDER BY id DESC LIMIT ?", (limit,))
+
+    async def delete_promo(self, promo_id: int) -> None:
+        await self._exec("DELETE FROM promo_use WHERE promo_id = ?", (promo_id,))
+        await self._exec("DELETE FROM promo WHERE id = ?", (promo_id,))
+
+    # ---------- предложения ----------
+
+    async def add_suggestion(self, title: str, norm: str) -> int:
+        suggestion_id = await self._exec(
+            "INSERT INTO suggestion(title, norm, created_at) VALUES(?,?,?)",
+            (title, norm, now()),
+        )
+        await self.add_alias(suggestion_id, norm)
+        return suggestion_id
+
+    async def add_alias(self, suggestion_id: int, alias: str) -> None:
+        if not alias:
+            return
+        await self._exec(
+            "INSERT OR IGNORE INTO suggestion_alias(suggestion_id, alias) VALUES(?,?)",
+            (suggestion_id, alias),
+        )
+
+    async def aliases_of(self, suggestion_id: int) -> list[str]:
+        rows = await self._fetchall(
+            "SELECT alias FROM suggestion_alias WHERE suggestion_id = ? ORDER BY alias",
+            (suggestion_id,),
+        )
+        return [r["alias"] for r in rows]
+
+    async def find_by_alias(self, alias: str) -> Optional[int]:
+        row = await self._fetchone(
+            "SELECT s.id FROM suggestion_alias a JOIN suggestion s ON s.id = a.suggestion_id "
+            "WHERE a.alias = ? AND s.status != 'rejected' LIMIT 1",
+            (alias,),
+        )
+        return int(row["id"]) if row else None
+
+    async def vote(self, suggestion_id: int, user_id: int) -> bool:
+        """Голос за предложение. False — этот человек уже голосовал."""
+        if await self._fetchone(
+            "SELECT 1 FROM suggestion_vote WHERE suggestion_id = ? AND user_id = ?",
+            (suggestion_id, user_id),
+        ):
+            return False
+        await self._exec(
+            "INSERT INTO suggestion_vote(suggestion_id, user_id, ts) VALUES(?,?,?)",
+            (suggestion_id, user_id, now()),
+        )
+        return True
+
+    async def vote_exists(self, suggestion_id: int, user_id: int) -> bool:
+        row = await self._fetchone(
+            "SELECT 1 FROM suggestion_vote WHERE suggestion_id = ? AND user_id = ?",
+            (suggestion_id, user_id),
+        )
+        return row is not None
+
+    async def votes_of(self, suggestion_id: int) -> int:
+        row = await self._fetchone(
+            "SELECT COUNT(*) c FROM suggestion_vote WHERE suggestion_id = ?", (suggestion_id,)
+        )
+        return int(row["c"]) if row else 0
+
+    async def get_suggestion(self, suggestion_id: int) -> Optional[aiosqlite.Row]:
+        return await self._fetchone("SELECT * FROM suggestion WHERE id = ?", (suggestion_id,))
+
+    async def open_suggestions(self) -> list[aiosqlite.Row]:
+        """Все незакрытые предложения с их псевдонимами — для сопоставления."""
+        return await self._fetchall(
+            "SELECT s.id, s.title, s.norm, "
+            "(SELECT COUNT(*) FROM suggestion_vote v WHERE v.suggestion_id = s.id) votes, "
+            "(SELECT GROUP_CONCAT(a.alias, '|') FROM suggestion_alias a "
+            " WHERE a.suggestion_id = s.id) aliases "
+            "FROM suggestion s WHERE s.status = 'new'"
+        )
+
+    async def top_suggestions(self, limit: int = 20) -> list[aiosqlite.Row]:
+        return await self._fetchall(
+            "SELECT s.*, "
+            "(SELECT COUNT(*) FROM suggestion_vote v WHERE v.suggestion_id = s.id) votes "
+            "FROM suggestion s WHERE s.status = 'new' "
+            "ORDER BY votes DESC, s.created_at LIMIT ?",
+            (limit,),
+        )
+
+    async def set_suggestion_status(self, suggestion_id: int, status: str) -> None:
+        await self._exec("UPDATE suggestion SET status = ? WHERE id = ?", (status, suggestion_id))
+
+    async def merge_suggestions(self, src_id: int, dst_id: int) -> None:
+        """Сливает одно предложение в другое: голоса и псевдонимы переезжают."""
+        await self._exec(
+            "INSERT OR IGNORE INTO suggestion_vote(suggestion_id, user_id, ts) "
+            "SELECT ?, user_id, ts FROM suggestion_vote WHERE suggestion_id = ?",
+            (dst_id, src_id),
+        )
+        await self._exec(
+            "INSERT OR IGNORE INTO suggestion_alias(suggestion_id, alias) "
+            "SELECT ?, alias FROM suggestion_alias WHERE suggestion_id = ?",
+            (dst_id, src_id),
+        )
+        await self._exec("DELETE FROM suggestion_vote WHERE suggestion_id = ?", (src_id,))
+        await self._exec("DELETE FROM suggestion_alias WHERE suggestion_id = ?", (src_id,))
+        await self._exec("DELETE FROM suggestion WHERE id = ?", (src_id,))
 
     # ---------- статистика ----------
 

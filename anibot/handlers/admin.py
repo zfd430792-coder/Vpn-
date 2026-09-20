@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
+import secrets
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -32,8 +34,12 @@ class AdminFSM(StatesGroup):
     grant = State()
     ban = State()
     rename = State()
-    set_free = State()
+    set_trial_days = State()
     set_autodelete = State()
+    promo_value = State()
+    promo_code = State()
+    promo_uses = State()
+    sugg_merge = State()
     set_price = State()
     up_title = State()
     up_season = State()
@@ -462,18 +468,19 @@ async def cmd_refund(message: Message, db: Database, cfg: Config, bot: Bot):
 
 
 async def _settings_view(db: Database, cfg: Config) -> tuple[str, object]:
-    free = await db.get_int_setting("free_episodes", cfg.free_episodes)
+    trial_on, trial_days = await service.trial_settings(db, cfg)
     protect = bool(await db.get_int_setting("protect_content", int(cfg.protect_content)))
     autodelete = await db.get_int_setting("autodelete", cfg.autodelete)
     text = (
         f"⚙️ <b>Настройки</b>\n{t.SEP}\n"
-        f"🎁 Бесплатных серий на юзера: <b>{free}</b>\n"
+        f"🎁 Тестовая подписка: <b>{'включена' if trial_on else 'выключена'}</b>\n"
+        f"📅 Срок теста: <b>{trial_days} дн.</b>\n"
         f"🔒 Защита от пересылки: <b>{'вкл' if protect else 'выкл'}</b>\n"
         f"⏲ Автоудаление выданного: <b>{autodelete or 'выкл'}</b>"
         f"{' мин.' if autodelete else ''}\n\n"
         "<i>Меняется тапом по кнопке.</i>"
     )
-    return text, kb.admin_settings(free, protect, autodelete)
+    return text, kb.admin_settings(trial_on, trial_days, protect, autodelete)
 
 
 @router.callback_query(kb.Adm.filter(F.act == "settings"))
@@ -495,21 +502,34 @@ async def adm_set_protect(call: CallbackQuery, db: Database, cfg: Config):
     await show(call, text, markup)
 
 
-@router.callback_query(kb.Adm.filter(F.act == "set_free"))
-async def adm_set_free(call: CallbackQuery, cfg: Config, state: FSMContext):
+@router.callback_query(kb.Adm.filter(F.act == "set_trial"))
+async def adm_set_trial(call: CallbackQuery, db: Database, cfg: Config):
     if not _admin_only(cfg, call.from_user.id):
         return
-    await state.set_state(AdminFSM.set_free)
-    await show(call, "🎁 Сколько серий давать бесплатно? (0 — всё платно)", kb.admin_cancel())
+    current, _days = await service.trial_settings(db, cfg)
+    await db.set_setting("trial_enabled", str(int(not current)))
+    await call.answer("Тест включён" if not current else "Тест выключен")
+    text, markup = await _settings_view(db, cfg)
+    await show(call, text, markup)
 
 
-@router.message(AdminFSM.set_free)
-async def adm_set_free_do(message: Message, db: Database, cfg: Config, state: FSMContext):
-    value = parser.as_int(message.text or "", -1)
-    if value < 0:
-        await message.answer("Нужно неотрицательное число.")
+@router.callback_query(kb.Adm.filter(F.act == "set_trial_days"))
+async def adm_set_trial_days(call: CallbackQuery, cfg: Config, state: FSMContext):
+    if not _admin_only(cfg, call.from_user.id):
         return
-    await db.set_setting("free_episodes", str(value))
+    await state.set_state(AdminFSM.set_trial_days)
+    await show(call, "📅 На сколько дней давать тестовую подписку?", kb.admin_cancel())
+
+
+@router.message(AdminFSM.set_trial_days)
+async def adm_set_trial_days_do(
+    message: Message, db: Database, cfg: Config, state: FSMContext
+):
+    value = parser.as_int(message.text or "", 0)
+    if value <= 0:
+        await message.answer("Нужно число больше нуля.")
+        return
+    await db.set_setting("trial_days", str(value))
     await state.clear()
     text, markup = await _settings_view(db, cfg)
     await message.answer(text, reply_markup=markup)
@@ -624,3 +644,231 @@ async def cmd_pull(
         anime_id, parser.as_int(season, 1) or 1, parser.as_int(number), dub, message_id
     )
     await status.edit_text(f"✅ Залито: <b>{title}</b> S{season}E{number} · {dub}")
+
+
+# ---------- предложения ----------
+
+
+@router.callback_query(kb.Adm.filter(F.act == "sugg"))
+async def adm_suggestions(call: CallbackQuery, callback_data: kb.Adm, db: Database, cfg: Config):
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    rows = await db.top_suggestions(200)
+    if not rows:
+        await show(call, "💡 Предложений пока нет.", kb.admin_cancel())
+        return
+    per = 10
+    pages = pages_of(len(rows), per)
+    page = max(0, min(callback_data.p, pages - 1))
+    chunk = rows[page * per : (page + 1) * per]
+    text = (
+        f"💡 <b>Предложения</b> ({len(rows)})\n{t.SEP}\n"
+        "Отсортированы по голосам. Тап — карточка."
+    )
+    await show(call, text, kb.admin_suggestions(chunk, page, pages))
+
+
+@router.callback_query(kb.Adm.filter(F.act == "sugg_one"))
+async def adm_suggestion(call: CallbackQuery, callback_data: kb.Adm, db: Database, cfg: Config):
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    row = await db.get_suggestion(callback_data.arg)
+    if row is None:
+        await show(call, "🤷 Предложение не найдено.", kb.admin_cancel())
+        return
+    votes = await db.votes_of(row["id"])
+    aliases = await db.aliases_of(row["id"])
+    text = (
+        f"💡 <b>{row['title']}</b>\n{t.SEP}\n"
+        f"🆔 <code>{row['id']}</code>\n"
+        f"👍 Голосов: <b>{votes}</b>\n"
+        f"🔤 Как писали: {', '.join(aliases) or '—'}"
+    )
+    await show(call, text, kb.admin_suggestion(row["id"]))
+
+
+@router.callback_query(kb.Adm.filter(F.act == "sugg_done"))
+async def adm_sugg_done(call: CallbackQuery, callback_data: kb.Adm, db: Database, cfg: Config):
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    await db.set_suggestion_status(callback_data.arg, "done")
+    await call.answer("Закрыл как залитое")
+    await adm_suggestions(call, kb.Adm(act="sugg"), db, cfg)
+
+
+@router.callback_query(kb.Adm.filter(F.act == "sugg_no"))
+async def adm_sugg_reject(call: CallbackQuery, callback_data: kb.Adm, db: Database, cfg: Config):
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    await db.set_suggestion_status(callback_data.arg, "rejected")
+    await call.answer("Отклонил")
+    await adm_suggestions(call, kb.Adm(act="sugg"), db, cfg)
+
+
+@router.callback_query(kb.Adm.filter(F.act == "sugg_merge"))
+async def adm_sugg_merge(call: CallbackQuery, callback_data: kb.Adm, cfg: Config, state: FSMContext):
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    await state.set_state(AdminFSM.sugg_merge)
+    await state.update_data(merge_src=callback_data.arg)
+    await show(
+        call,
+        "🔗 Пришли <b>id того предложения</b>, в которое слить это.\n\n"
+        "Голоса и написания переедут туда, это исчезнет.",
+        kb.admin_cancel(),
+    )
+
+
+@router.message(AdminFSM.sugg_merge)
+async def adm_sugg_merge_do(message: Message, db: Database, state: FSMContext):
+    dst = parser.as_int(message.text or "", 0)
+    data = await state.get_data()
+    src = data.get("merge_src", 0)
+    if not dst or dst == src:
+        await message.answer("Нужен id другого предложения.")
+        return
+    if await db.get_suggestion(dst) is None:
+        await message.answer("Предложения с таким id нет.")
+        return
+    await db.merge_suggestions(src, dst)
+    await state.clear()
+    votes = await db.votes_of(dst)
+    row = await db.get_suggestion(dst)
+    await message.answer(
+        f"✅ Слил. Теперь у <b>{row['title']}</b> голосов: <b>{votes}</b>",
+        reply_markup=kb.admin_panel(),
+    )
+
+
+# ---------- промокоды ----------
+
+
+@router.callback_query(kb.Adm.filter(F.act == "promos"))
+async def adm_promos(call: CallbackQuery, db: Database, cfg: Config, state: FSMContext):
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    await state.clear()
+    rows = await db.list_promos()
+    text = (
+        f"🎟 <b>Промокоды</b> ({len(rows)})\n{t.SEP}\n"
+        "Формат строки: код · что даёт · использований."
+        if rows
+        else f"🎟 <b>Промокоды</b>\n{t.SEP}\nПока ни одного."
+    )
+    await show(call, text, kb.admin_promos(rows))
+
+
+@router.callback_query(kb.Adm.filter(F.act == "promo_new"))
+async def adm_promo_new(call: CallbackQuery, cfg: Config, state: FSMContext):
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    await state.clear()
+    await show(call, "🎟 <b>Новый промокод</b>\n\nЧто он будет давать?", kb.promo_kind())
+
+
+@router.callback_query(kb.Adm.filter(F.act.in_({"promo_kind_sub", "promo_kind_disc"})))
+async def adm_promo_kind(call: CallbackQuery, callback_data: kb.Adm, cfg: Config, state: FSMContext):
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    kind = "sub" if callback_data.act == "promo_kind_sub" else "discount"
+    await state.set_state(AdminFSM.promo_value)
+    await state.update_data(promo_kind=kind)
+    question = (
+        "⭐ На сколько <b>дней</b> подписки?"
+        if kind == "sub"
+        else "💲 Сколько <b>процентов</b> скидки? (1–99)"
+    )
+    await show(call, question, kb.admin_cancel())
+
+
+@router.message(AdminFSM.promo_value)
+async def adm_promo_value(message: Message, state: FSMContext):
+    value = parser.as_int(message.text or "", 0)
+    data = await state.get_data()
+    kind = data.get("promo_kind", "sub")
+    if value <= 0 or (kind == "discount" and value > 99):
+        await message.answer("Нужно число" + (" от 1 до 99." if kind == "discount" else " больше нуля."))
+        return
+    await state.update_data(promo_amount=value)
+    await state.set_state(AdminFSM.promo_code)
+    await message.answer(
+        "🎟 Теперь сам код. Пришли его текстом "
+        "или напиши <code>-</code>, и я придумаю сам."
+    )
+
+
+@router.message(AdminFSM.promo_code)
+async def adm_promo_code(message: Message, db: Database, state: FSMContext):
+    raw = (message.text or "").strip().upper()
+    if raw in {"-", ""}:
+        raw = "AN" + secrets.token_hex(3).upper()
+    if not re.fullmatch(r"[A-Z0-9_-]{3,32}", raw):
+        await message.answer("Код — 3–32 знака: латиница, цифры, дефис или подчёркивание.")
+        return
+    if await db.get_promo(raw) is not None:
+        await message.answer("Такой код уже есть, придумай другой.")
+        return
+    await state.update_data(promo_code=raw)
+    await state.set_state(AdminFSM.promo_uses)
+    await message.answer(
+        "🔢 Сколько раз можно использовать?\n"
+        "Числом, или <code>-</code> — без ограничения."
+    )
+
+
+@router.message(AdminFSM.promo_uses)
+async def adm_promo_uses(message: Message, db: Database, state: FSMContext):
+    raw = (message.text or "").strip()
+    max_uses = 0 if raw in {"-", ""} else parser.as_int(raw, 0)
+    data = await state.get_data()
+    kind = data.get("promo_kind", "sub")
+    amount = data.get("promo_amount", 0)
+    code = data.get("promo_code", "")
+
+    await db.add_promo(
+        code=code,
+        kind=kind,
+        days=amount if kind == "sub" else 0,
+        percent=amount if kind == "discount" else 0,
+        max_uses=max_uses,
+    )
+    await state.clear()
+
+    what = f"подписку на {amount} дн." if kind == "sub" else f"скидку {amount}%"
+    limit = "без ограничений" if not max_uses else f"{max_uses} раз"
+    await message.answer(
+        f"✅ <b>Промокод создан</b>\n{t.SEP}\n"
+        f"Код: <code>{code}</code>\n"
+        f"Даёт: {what}\n"
+        f"Использований: {limit}",
+        reply_markup=kb.admin_panel(),
+    )
+
+
+@router.callback_query(kb.Adm.filter(F.act == "promo_one"))
+async def adm_promo_one(call: CallbackQuery, callback_data: kb.Adm, db: Database, cfg: Config):
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    rows = [r for r in await db.list_promos(500) if r["id"] == callback_data.arg]
+    if not rows:
+        await show(call, "🤷 Промокод не найден.", kb.admin_cancel())
+        return
+    row = rows[0]
+    what = f"подписка {row['days']} дн." if row["kind"] == "sub" else f"скидка {row['percent']}%"
+    limit = "без ограничений" if not row["max_uses"] else f"{row['used']} из {row['max_uses']}"
+    await show(
+        call,
+        f"🎟 <b>{row['code']}</b>\n{t.SEP}\n"
+        f"Даёт: {what}\n"
+        f"Использован: {limit}",
+        kb.admin_promo_one(row["id"]),
+    )
+
+
+@router.callback_query(kb.Adm.filter(F.act == "promo_del"))
+async def adm_promo_del(call: CallbackQuery, callback_data: kb.Adm, db: Database, cfg: Config, state: FSMContext):
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    await db.delete_promo(callback_data.arg)
+    await call.answer("Удалён")
+    await adm_promos(call, db, cfg, state)

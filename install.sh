@@ -203,7 +203,8 @@ SESSION=$OLD_SESSION
 STORAGE_CHANNEL=$OLD_CHANNEL
 CHANNEL_TITLE=${CHANNEL_TITLE:-Anime Storage}
 DATA_DIR=$DATA_DIR
-FREE_EPISODES=${FREE_EPISODES:-3}
+TRIAL_ENABLED=${TRIAL_ENABLED:-1}
+TRIAL_DAYS=${TRIAL_DAYS:-3}
 PROTECT_CONTENT=${PROTECT_CONTENT:-1}
 AUTODELETE=${AUTODELETE:-0}
 DELIVERY=${DELIVERY:-bot}
@@ -228,11 +229,60 @@ fi
 
 # ------------------------------------------------------------- 7. systemd
 step "Создаю сервис ${SERVICE}"
+
+# Скрипт-тревога: его дёргает systemd, когда сервис падает. Сам бот в этот
+# момент уже мёртв и написать не может, поэтому шлём через curl.
+cat > /usr/local/bin/anime-bot-alert <<'ALERTEOF'
+#!/usr/bin/env bash
+set -u
+ENV_FILE="${ENV_FILE:-/etc/anime-bot/env}"
+[[ -f "$ENV_FILE" ]] || exit 0
+set -a; . "$ENV_FILE"; set +a
+[[ -n "${BOT_TOKEN:-}" ]] || exit 0
+
+UNIT="${1:-anime-bot.service}"
+LOG="$(journalctl -u "$UNIT" -n 12 --no-pager 2>/dev/null | tail -12)"
+TEXT="🔴 Сервис $UNIT упал
+$(date '+%d.%m %H:%M')
+Хост: $(hostname)
+
+Последние строки лога:
+$LOG"
+
+send() {  # send <чат> [тема]
+  local chat="$1" thread="${2:-}"
+  local args=(--data-urlencode "chat_id=$chat" --data-urlencode "text=$TEXT")
+  [[ -n "$thread" ]] && args+=(--data-urlencode "message_thread_id=$thread")
+  curl -s --max-time 15 -X POST     "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" "${args[@]}" >/dev/null || true
+}
+
+if [[ -n "${LOG_ERRORS:-}" ]]; then
+  send "${LOG_ERRORS%%:*}" "$(printf '%s' "${LOG_ERRORS#*:}" | grep -E '^[0-9]+$' || true)"
+fi
+IFS=',' read -ra IDS <<< "${ADMINS:-}"
+for id in "${IDS[@]}"; do
+  id="${id// /}"
+  [[ -n "$id" ]] && send "$id"
+done
+ALERTEOF
+chmod +x /usr/local/bin/anime-bot-alert
+
+cat > "/etc/systemd/system/${SERVICE}-alert@.service" <<ALERTUNIT
+[Unit]
+Description=Сообщить админам, что %i упал
+
+[Service]
+Type=oneshot
+Environment=ENV_FILE=$ENV_DIR/env
+ExecStart=/usr/local/bin/anime-bot-alert %i
+ALERTUNIT
+
 cat > "/etc/systemd/system/${SERVICE}.service" <<UNITEOF
 [Unit]
 Description=anime-bot — каталог и выдача серий в Telegram
 After=network-online.target
 Wants=network-online.target
+OnFailure=${SERVICE}-alert@%n.service
 
 [Service]
 Type=simple

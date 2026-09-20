@@ -28,8 +28,14 @@ async def send_episode(
     user_id = call.from_user.id
 
     if not await service.has_access(db, cfg, user_id, ep.id):
-        quota = await service.free_quota(db, cfg)
-        await show(call, t.PAYWALL.format(total=quota), kb.paywall())
+        status = await service.status_line(db, cfg, user_id)
+        trial_ok = await service.can_take_trial(db, cfg, user_id)
+        _enabled, trial_days = await service.trial_settings(db, cfg)
+        await show(
+            call,
+            t.PAYWALL.format(status=status),
+            kb.paywall(trial_ok, trial_days),
+        )
         return
 
     anime = await db.get_anime(ep.anime_id)

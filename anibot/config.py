@@ -33,6 +33,26 @@ def _bool(key: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "on", "да"}
 
 
+def _target(key: str) -> tuple[int, int | None]:
+    """Адрес служебного чата вида «-1001234:7» — чат и тема внутри него.
+
+    Без темы (обычный канал) — просто «-1001234».
+    """
+    raw = _env(key)
+    if not raw:
+        return 0, None
+    chat, _, thread = raw.partition(":")
+    try:
+        chat_id = int(chat)
+    except ValueError:
+        return 0, None
+    try:
+        thread_id = int(thread) if thread else None
+    except ValueError:
+        thread_id = None
+    return chat_id, thread_id
+
+
 def _ids(key: str) -> set[int]:
     out: set[int] = set()
     for chunk in _env(key).replace(";", ",").split(","):
@@ -52,10 +72,18 @@ class Config:
     storage_channel: int = 0
     channel_title: str = "Anime Storage"
     data_dir: Path = Path("/var/lib/anime-bot")
-    free_episodes: int = 3
     protect_content: bool = True
     autodelete: int = 0
     delivery: str = "bot"
+    trial_enabled: bool = True
+    trial_days: int = 3
+    service_group: int = 0
+    # назначение -> (чат, тема). Заполняет python -m anibot.setup
+    notify: dict[str, tuple[int, int | None]] = field(default_factory=dict)
+
+    def target(self, purpose: str) -> tuple[int, int | None]:
+        """Куда слать служебное сообщение. (0, None) — некуда, шлём админам."""
+        return self.notify.get(purpose, (0, None))
 
     @property
     def db_path(self) -> Path:
@@ -91,10 +119,18 @@ def load() -> Config:
         storage_channel=_int("STORAGE_CHANNEL"),
         channel_title=_env("CHANNEL_TITLE") or "Anime Storage",
         data_dir=Path(_env("DATA_DIR") or "/var/lib/anime-bot"),
-        free_episodes=_int("FREE_EPISODES", 3),
         protect_content=_bool("PROTECT_CONTENT", True),
         autodelete=_int("AUTODELETE", 0),
         delivery=(_env("DELIVERY") or "bot").lower(),
+        trial_enabled=_bool("TRIAL_ENABLED", True),
+        trial_days=_int("TRIAL_DAYS", 3),
+        service_group=_int("SERVICE_GROUP"),
+        notify={
+            "suggestions": _target("LOG_SUGGESTIONS"),
+            "payments": _target("LOG_PAYMENTS"),
+            "stats": _target("LOG_STATS"),
+            "logs": _target("LOG_ERRORS"),
+        },
     )
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     return cfg

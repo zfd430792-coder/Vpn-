@@ -24,6 +24,7 @@ from telethon.tl.functions.channels import (
     CreateChannelRequest,
     EditAdminRequest,
     InviteToChannelRequest,
+    ToggleForumRequest,
 )
 from telethon.tl.types import ChatAdminRights
 
@@ -39,6 +40,20 @@ BOT_RIGHTS = ChatAdminRights(
     ban_users=False,
     add_admins=False,
     manage_call=False,
+)
+
+# Для служебной группы боту нужно ещё и право заводить темы.
+SERVICE_RIGHTS = ChatAdminRights(
+    post_messages=True,
+    edit_messages=True,
+    delete_messages=True,
+    invite_users=True,
+    pin_messages=True,
+    change_info=True,
+    ban_users=True,
+    add_admins=False,
+    manage_call=False,
+    manage_topics=True,
 )
 
 
@@ -110,8 +125,53 @@ class Userbot:
         await self.grant_bot(channel, bot_username)
         return to_bot_id(channel.id)
 
-    async def grant_bot(self, channel, bot_username: str) -> bool:
-        """Добавляет бота в канал администратором."""
+    async def create_service_group(
+        self, title: str, bot_username: str
+    ) -> tuple[int | None, bool]:
+        """Закрытая супергруппа для служебных сообщений.
+
+        Возвращает (id группы, включились ли темы). Если Telegram темы не дал,
+        вернётся False — вызывающий заведёт отдельные каналы под каждое
+        назначение.
+        """
+        client = await self.client()
+        if client is None:
+            return None, False
+
+        forum = True
+        try:
+            result = await client(
+                CreateChannelRequest(
+                    title=title,
+                    about="Служебная группа бота: предложения, платежи, статистика, логи.",
+                    megagroup=True,
+                    forum=True,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — на старых слоях forum может не пройти
+            log.warning("Группу с темами создать не вышло (%s), делаю обычную", exc)
+            forum = False
+            result = await client(
+                CreateChannelRequest(
+                    title=title,
+                    about="Служебная группа бота.",
+                    megagroup=True,
+                )
+            )
+
+        channel = result.chats[0]
+        if not forum:
+            try:
+                await client(ToggleForumRequest(channel=channel, enabled=True))
+                forum = True
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Темы включить не удалось: %s", exc)
+
+        await self.grant_bot(channel, bot_username, service=True)
+        return to_bot_id(channel.id), forum
+
+    async def grant_bot(self, channel, bot_username: str, service: bool = False) -> bool:
+        """Добавляет бота в канал или группу администратором."""
         client = await self.client()
         if client is None:
             return False
@@ -123,7 +183,10 @@ class Userbot:
         try:
             await client(
                 EditAdminRequest(
-                    channel=channel, user_id=username, admin_rights=BOT_RIGHTS, rank="bot"
+                    channel=channel,
+                    user_id=username,
+                    admin_rights=SERVICE_RIGHTS if service else BOT_RIGHTS,
+                    rank="bot",
                 )
             )
             return True

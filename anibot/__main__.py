@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import sys
 
@@ -12,7 +13,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
-from . import config, handlers
+from . import config, handlers, notify
 from .db import Database
 from .middlewares import Deps
 from .userbot import Userbot
@@ -29,7 +30,8 @@ COMMANDS = [
 async def seed_settings(db: Database, cfg: config.Config) -> None:
     """Переносит значения из env в базу при первом запуске."""
     defaults = {
-        "free_episodes": str(cfg.free_episodes),
+        "trial_enabled": str(int(cfg.trial_enabled)),
+        "trial_days": str(cfg.trial_days),
         "protect_content": str(int(cfg.protect_content)),
         "autodelete": str(cfg.autodelete),
     }
@@ -79,11 +81,23 @@ async def run() -> None:
     if cfg.storage_channel:
         log.info("Хранилище: %s", cfg.storage_channel)
 
+    # ошибки уровня ERROR уходят в служебный чат логов
+    logging.getLogger("anibot").addHandler(
+        notify.ErrorReporter(bot, cfg, asyncio.get_running_loop())
+    )
+
+    await notify.report_startup(bot, cfg, db)
+    heartbeat = asyncio.create_task(notify.heartbeat_loop(db))
+
     try:
         await bot.set_my_commands(COMMANDS)
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
+        await notify.report_shutdown(bot, cfg)
         await userbot.stop()
         await db.close()
         await bot.session.close()

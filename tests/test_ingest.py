@@ -193,4 +193,19 @@ async def main():
     print("✅ Заливка работает во всех режимах")
 
 
-asyncio.run(main())
+def _run(coro):
+    """Запуск с жёстким выходом: иначе поток SQLite держит процесс после падения."""
+    import os
+    import traceback
+
+    try:
+        asyncio.run(coro)
+    except SystemExit as exc:
+        os._exit(exc.code or 0)
+    except BaseException:
+        traceback.print_exc()
+        os._exit(1)
+    os._exit(0)
+
+
+_run(main())

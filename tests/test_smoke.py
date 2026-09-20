@@ -30,7 +30,7 @@ async def main():
     handlers.setup(dp)
     names = [r.name for r in dp.sub_routers]
     check("роутеры подключены в нужном порядке",
-          names == ["admin", "subscription", "start", "watch", "catalog", "channel"], names)
+          names == ["admin", "subscription", "start", "suggestions", "watch", "catalog", "channel"], names)
     used = dp.resolve_used_update_types()
     check("бот слушает channel_post", "channel_post" in used, used)
     check("бот слушает pre_checkout_query", "pre_checkout_query" in used, used)
@@ -76,20 +76,28 @@ async def main():
     check("за последней серией пусто", await db.neighbour(nxt, +1) is None)
     check("перед первой пусто", await db.neighbour(ep, -1) is None)
 
-    print("\n[5] Доступ: бесплатная квота и подписка")
-    await db.set_setting("free_episodes", "2")
+    print("\n[5] Доступ: тестовая подписка и платная")
+    await db.set_setting("trial_enabled", "1")
+    await db.set_setting("trial_days", "3")
     uid = 555
     await db.touch_user(uid, "u", "U")
-    check("первая серия бесплатна", await service.has_access(db, cfg, uid, ep.id))
-    await db.add_view(uid, ep.id)
-    check("вторая бесплатна", await service.has_access(db, cfg, uid, nxt.id))
-    await db.add_view(uid, nxt.id)
-    third = await db.find_episode(alpha.id, 2, 1, "Studio Band")
-    check("третья упирается в пейволл", not await service.has_access(db, cfg, uid, third.id))
-    check("уже открытую пускает снова", await service.has_access(db, cfg, uid, ep.id))
+    check("без подписки доступа нет", not await service.has_access(db, cfg, uid, ep.id))
+    check("тестовая подписка доступна", await service.can_take_trial(db, cfg, uid))
+    until = await service.give_trial(db, cfg, uid)
+    check("после теста доступ открыт", await service.has_access(db, cfg, uid, ep.id))
+    check("тест выдан примерно на 3 дня", 2 * 86400 < until - int(__import__("time").time()) <= 3 * 86400)
+    check("второй раз тест не дают", not await service.can_take_trial(db, cfg, uid))
+    await db.revoke_sub(uid)
+    check("после теста снова платно", not await service.has_access(db, cfg, uid, ep.id))
+    check("повторный тест недоступен", not await service.can_take_trial(db, cfg, uid))
     await db.grant_sub(uid, 30)
-    check("с подпиской пускает", await service.has_access(db, cfg, uid, third.id))
-    check("админа пускает всегда", await service.has_access(db, cfg, 777, third.id))
+    check("с подпиской пускает", await service.has_access(db, cfg, uid, ep.id))
+    check("админа пускает всегда", await service.has_access(db, cfg, 777, ep.id))
+
+    await db.set_setting("trial_enabled", "0")
+    await db.touch_user(556, "v", "V")
+    check("выключенный тест не предлагается", not await service.can_take_trial(db, cfg, 556))
+    await db.set_setting("trial_enabled", "1")
 
     print("\n[6] Клавиатуры и лимит callback_data в 64 байта")
     plans = await service.plans(db)
@@ -100,7 +108,7 @@ async def main():
         "озвучки": kb.dubs(alpha.id, 1, 2, dubs),
         "плеер": kb.player(ep, True, True, 2), "подписка": kb.subscription(plans, False),
         "админка": kb.admin_panel(), "тайтлы": kb.admin_titles(everything, 0, 2),
-        "настройки": kb.admin_settings(2, True, 0), "цены": kb.admin_prices(plans),
+        "настройки": kb.admin_settings(True, 3, True, 0), "цены": kb.admin_prices(plans),
     }
     worst = 0
     for name, markup in markups.items():
@@ -137,10 +145,19 @@ async def main():
         sys.exit(1)
     print("✅ Все проверки прошли")
 
-async def guarded():
-    try:
-        await main()
-    finally:
-        pass
+def _run(coro):
+    """Запуск с жёстким выходом: иначе поток SQLite держит процесс после падения."""
+    import os
+    import traceback
 
-asyncio.run(main())
+    try:
+        asyncio.run(coro)
+    except SystemExit as exc:
+        os._exit(exc.code or 0)
+    except BaseException:
+        traceback.print_exc()
+        os._exit(1)
+    os._exit(0)
+
+
+_run(main())

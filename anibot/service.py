@@ -18,23 +18,39 @@ from .userbot import Userbot
 log = logging.getLogger("anibot.service")
 
 
-async def free_quota(db: Database, cfg: Config) -> int:
-    return await db.get_int_setting("free_episodes", cfg.free_episodes)
+async def trial_settings(db: Database, cfg: Config) -> tuple[bool, int]:
+    """(включена ли тестовая подписка, на сколько дней)"""
+    enabled = bool(await db.get_int_setting("trial_enabled", int(cfg.trial_enabled)))
+    days = await db.get_int_setting("trial_days", cfg.trial_days)
+    return enabled, max(1, days)
+
+
+async def can_take_trial(db: Database, cfg: Config, user_id: int) -> bool:
+    """Доступна ли человеку тестовая подписка прямо сейчас."""
+    enabled, _days = await trial_settings(db, cfg)
+    if not enabled:
+        return False
+    if await db.has_sub(user_id):
+        return False
+    return not await db.trial_used(user_id)
+
+
+async def give_trial(db: Database, cfg: Config, user_id: int) -> int:
+    """Выдаёт тестовую подписку. Возвращает, до какого времени она活 действует."""
+    _enabled, days = await trial_settings(db, cfg)
+    await db.mark_trial_used(user_id)
+    return await db.grant_sub(user_id, days)
 
 
 async def has_access(db: Database, cfg: Config, user_id: int, episode_id: int) -> bool:
-    """Пускать ли пользователя к этой серии."""
+    """Пускать ли пользователя к серии.
+
+    Бесплатных серий больше нет: доступ даёт подписка, а познакомиться
+    с ботом можно через тестовую подписку — её человек включает сам.
+    """
     if cfg.is_admin(user_id):
         return True
-    if await db.has_sub(user_id):
-        return True
-    quota = await free_quota(db, cfg)
-    if quota <= 0:
-        return False
-    # уже открытую серию не считаем повторно — иначе квота тает от перемоток
-    if await db.has_seen(user_id, episode_id):
-        return True
-    return await db.views_count(user_id) < quota
+    return await db.has_sub(user_id)
 
 
 async def _autodelete(bot: Bot, chat_id: int, message_id: int, minutes: int) -> None:
@@ -103,26 +119,32 @@ async def deliver(
     return True
 
 
-async def quota_line(db: Database, cfg: Config, user_id: int) -> str:
-    """Строчка про остаток бесплатных серий для профиля."""
-    if cfg.is_admin(user_id) or await db.has_sub(user_id):
+async def status_line(db: Database, cfg: Config, user_id: int) -> str:
+    """Строчка о доступе для профиля и пейволла."""
+    if cfg.is_admin(user_id):
         return t.QUOTA_UNLIMITED
-    quota = await free_quota(db, cfg)
-    if quota <= 0:
-        return t.QUOTA_OVER
-    used = await db.views_count(user_id)
-    left = max(0, quota - used)
-    if left == 0:
-        return t.QUOTA_OVER
-    return t.QUOTA_LEFT.format(left=left, total=quota)
+    if await db.has_sub(user_id):
+        return t.QUOTA_UNLIMITED
+    if await can_take_trial(db, cfg, user_id):
+        _enabled, days = await trial_settings(db, cfg)
+        return t.TRIAL_OFFER.format(days=days)
+    if await db.trial_used(user_id):
+        return t.TRIAL_SPENT
+    return t.QUOTA_OVER
 
 
-async def plans(db: Database) -> dict[str, tuple[str, int, int]]:
-    """Тарифы с ценами из настроек (админ меняет их в панели)."""
+async def plans(db: Database, user_id: int | None = None) -> dict[str, tuple[str, int, int]]:
+    """Тарифы с ценами из настроек. Если передан user_id — с его скидкой."""
     from .config import DEFAULT_PLANS
+
+    percent = 0
+    if user_id is not None:
+        percent, _promo = await db.get_discount(user_id)
 
     out: dict[str, tuple[str, int, int]] = {}
     for code, (label, days, stars) in DEFAULT_PLANS.items():
         price = await db.get_int_setting(f"price_{code}", stars)
+        if percent:
+            price = max(1, round(price * (100 - percent) / 100))
         out[code] = (label, days, price)
     return out
