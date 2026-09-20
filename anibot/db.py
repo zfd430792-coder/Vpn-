@@ -64,6 +64,18 @@ CREATE TABLE IF NOT EXISTS payment (
     refunded  INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS watch_request (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL,
+    title         TEXT    NOT NULL,
+    norm          TEXT    NOT NULL,
+    suggestion_id INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    notified_at   INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(user_id, norm)
+);
+CREATE INDEX IF NOT EXISTS idx_watch_open ON watch_request(notified_at);
+
 CREATE TABLE IF NOT EXISTS ticket (
     user_id    INTEGER PRIMARY KEY,
     thread_id  INTEGER NOT NULL DEFAULT 0,   -- тема в служебной группе
@@ -585,6 +597,61 @@ class Database:
             (anime_id,),
         )
         return len(seasons), total, [r["dub"] for r in rows], [int(q["quality"]) for q in qrows]
+
+    # ---------- «сообщить, когда появится» ----------
+
+    async def add_watch(
+        self, user_id: int, title: str, norm: str, suggestion_id: int = 0
+    ) -> bool:
+        """Подписка на появление тайтла. False — такая уже была."""
+        await self.ensure_user(user_id)
+        existing = await self._fetchone(
+            "SELECT id FROM watch_request WHERE user_id = ? AND norm = ?", (user_id, norm)
+        )
+        if existing is not None:
+            return False
+        await self._exec(
+            "INSERT INTO watch_request(user_id, title, norm, suggestion_id, created_at) "
+            "VALUES(?,?,?,?,?)",
+            (user_id, title, norm, suggestion_id, now()),
+        )
+        return True
+
+    async def open_watches(self) -> list[aiosqlite.Row]:
+        """Заявки, по которым ещё не уведомляли."""
+        return await self._fetchall(
+            "SELECT * FROM watch_request WHERE notified_at = 0 ORDER BY created_at"
+        )
+
+    async def watches_of(self, user_id: int) -> list[aiosqlite.Row]:
+        return await self._fetchall(
+            "SELECT * FROM watch_request WHERE user_id = ? AND notified_at = 0 "
+            "ORDER BY created_at",
+            (user_id,),
+        )
+
+    async def has_watch(self, user_id: int, norm: str) -> bool:
+        row = await self._fetchone(
+            "SELECT 1 FROM watch_request WHERE user_id = ? AND norm = ? AND notified_at = 0",
+            (user_id, norm),
+        )
+        return row is not None
+
+    async def mark_notified(self, watch_id: int) -> None:
+        await self._exec(
+            "UPDATE watch_request SET notified_at = ? WHERE id = ?", (now(), watch_id)
+        )
+
+    async def drop_watch(self, user_id: int, norm: str) -> None:
+        await self._exec(
+            "DELETE FROM watch_request WHERE user_id = ? AND norm = ?", (user_id, norm)
+        )
+
+    async def count_open_watches(self) -> int:
+        row = await self._fetchone(
+            "SELECT COUNT(*) c FROM watch_request WHERE notified_at = 0"
+        )
+        return int(row["c"]) if row else 0
 
     # ---------- поддержка ----------
 

@@ -9,6 +9,7 @@ from aiogram.types import CallbackQuery, Message
 
 from .. import keyboards as kb
 from .. import search as se
+from .. import suggest
 from .. import texts as t
 from ..db import Database
 from .common import pages_of, show
@@ -16,6 +17,7 @@ from .common import pages_of, show
 router = Router(name="catalog")
 
 RESULTS_KEY = "results"
+WANT_KEY = "want"
 
 
 async def _anime_card(db: Database, anime_id: int) -> tuple[str, list[int]] | None:
@@ -98,7 +100,12 @@ async def search_text(message: Message, db: Database, state: FSMContext):
         found = [by_id[i] for i in order if i in by_id][:30]
 
     if not found:
-        await message.answer(t.NOT_FOUND.format(query=query), reply_markup=kb.back_to())
+        norm_q = se.normalize(query)
+        await state.update_data({WANT_KEY: query})
+        already = await db.has_watch(message.from_user.id, norm_q)
+        await message.answer(
+            t.NOT_FOUND.format(query=query), reply_markup=kb.not_found(already)
+        )
         return
 
     if len(found) == 1:
@@ -115,6 +122,47 @@ async def search_text(message: Message, db: Database, state: FSMContext):
     await message.answer(
         text, reply_markup=kb.anime_list(found[: kb.PER_PAGE], 0, pages, "sr")
     )
+
+
+@router.callback_query(kb.Nav.filter(F.to == "wantit"))
+async def nav_want(call: CallbackQuery, db: Database, state: FSMContext):
+    """Подписка на появление тайтла. Заодно идёт голосом в предложения."""
+    data = await state.get_data()
+    query = (data.get(WANT_KEY) or "").strip()
+    if not query:
+        await call.answer("Название потерялось — поищи ещё раз", show_alert=True)
+        return
+
+    norm_q = se.normalize(query)
+    known = await db.find_by_alias(norm_q)
+    if known is None:
+        best, _alts = suggest.match(query, await _suggest_candidates(db))
+        known = best.candidate.id if best else None
+    if known is None:
+        known = await db.add_suggestion(query, norm_q)
+    else:
+        await db.add_alias(known, norm_q)
+    await db.vote(known, call.from_user.id)
+
+    added = await db.add_watch(call.from_user.id, query, norm_q, known)
+    votes = await db.votes_of(known)
+    await call.answer("Сообщу, когда появится 🔔" if added else "Ты уже в списке ожидания")
+    await show(
+        call,
+        t.WANT_OK.format(query=query, votes=votes),
+        kb.back_to(),
+    )
+
+
+async def _suggest_candidates(db: Database) -> list:
+    rows = await db.open_suggestions()
+    out = []
+    for row in rows:
+        aliases = [a for a in (row["aliases"] or "").split("|") if a]
+        out.append(
+            suggest.Candidate(row["id"], row["title"], row["norm"], row["votes"] or 0, aliases)
+        )
+    return out
 
 
 # ---------- тайтл → сезон → серия → озвучка ----------

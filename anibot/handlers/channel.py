@@ -14,6 +14,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message
 
 from .. import parser
+from .. import watchlist
 from .. import search as se
 from ..config import Config
 from ..db import Database
@@ -63,6 +64,11 @@ async def _ingest(message: Message, db: Database, cfg: Config, bot: Bot) -> None
         duration=getattr(media, "duration", 0) or 0,
     )
     log.info("Из канала: %s", parsed)
+
+    # заявки «сообщить, когда появится» проверяются сами, без кнопок
+    anime = await db.get_anime(anime_id)
+    if anime is not None:
+        await watchlist.on_new_title(bot, cfg, db, anime)
     await _notify(
         bot,
         cfg,

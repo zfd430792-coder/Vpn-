@@ -19,6 +19,7 @@ from .. import keyboards as kb
 from .. import parser
 from .. import search as se
 from .. import service
+from .. import watchlist
 from .. import texts as t
 from ..config import DEFAULT_PLANS, Config
 from ..db import Database
@@ -326,11 +327,18 @@ async def _save_upload(
         duration=data.get("duration", 0),
     )
     await state.clear()
+
+    anime = await db.get_anime(anime_id)
+    notified = 0
+    if anime is not None:
+        notified = await watchlist.on_new_title(message.bot, cfg, db, anime)
+
     await message.answer(
         f"✅ <b>Сохранено</b>\n{t.SEP}\n"
         f"🎬 {parsed.title}\n"
         f"📀 Сезон {parsed.season} · 🎞 Серия {parsed.episode}\n"
-        f"🎙 {parsed.dub} · 💎 {parsed.quality_name}",
+        f"🎙 {parsed.dub} · 💎 {parsed.quality_name}"
+        + (f"\n🔔 Уведомлено ожидавших: <b>{notified}</b>" if notified else ""),
         reply_markup=kb.admin_panel(),
     )
 
@@ -894,3 +902,46 @@ async def adm_promo_del(call: CallbackQuery, callback_data: kb.Adm, db: Database
     await db.delete_promo(callback_data.arg)
     await call.answer("Удалён")
     await adm_promos(call, db, cfg, state)
+
+
+
+# ---------- сверка каталога с заявками ----------
+
+
+@router.callback_query(kb.Adm.filter(F.act == "scan"))
+async def adm_scan(call: CallbackQuery, db: Database, cfg: Config):
+    """Полный проход: что из ожидаемого уже лежит в каталоге."""
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    await call.answer("Проверяю…")
+
+    waiting = await db.count_open_watches()
+    found, sent, closed = await watchlist.full_scan(call.bot, db)
+
+    lines = [
+        f"🔎 <b>Проверка каталога</b>\n{t.SEP}",
+        f"Заявок в ожидании было: <b>{waiting}</b>",
+        f"Нашлось в каталоге: <b>{found}</b>",
+        f"Уведомлено людей: <b>{sent}</b>",
+    ]
+    if closed:
+        lines.append("\n<b>Закрыто предложений:</b>")
+        lines.extend(f"• {line}" for line in closed[:15])
+        if len(closed) > 15:
+            lines.append(f"…и ещё {len(closed) - 15}")
+    if not found and not closed:
+        lines.append("\n<i>Ничего нового — всё ожидаемое ещё не залито.</i>")
+
+    await show(call, "\n".join(lines), kb.admin_panel())
+
+
+@router.message(Command("scan"))
+async def cmd_scan(message: Message, db: Database, cfg: Config):
+    if not _admin_only(cfg, message.from_user.id):
+        return
+    found, sent, closed = await watchlist.full_scan(message.bot, db)
+    await message.answer(
+        f"🔎 Нашлось: <b>{found}</b>, уведомлено: <b>{sent}</b>, "
+        f"закрыто предложений: <b>{len(closed)}</b>",
+        reply_markup=kb.admin_panel(),
+    )

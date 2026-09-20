@@ -247,6 +247,7 @@ def admin_panel() -> InlineKeyboardMarkup:
     kb.row(_adm("📣 Рассылка", "broadcast"), _adm("⭐ Выдать подписку", "grant"))
     kb.row(_adm("🚫 Бан / разбан", "ban"), _adm("💰 Платежи", "payments"))
     kb.row(_adm("💡 Предложения", "sugg"), _adm("🎟 Промокоды", "promos"))
+    kb.row(_adm("🔎 Проверить тайтлы", "scan"))
     kb.row(_adm("⚙️ Настройки", "settings"), _adm("🔄 Обновить", "refresh"))
     kb.row(_nav("🏠 В меню", "menu"))
     return kb.as_markup()
@@ -370,4 +371,23 @@ def promo_kind() -> InlineKeyboardMarkup:
     kb.row(_adm("⭐ Даёт подписку", "promo_kind_sub"))
     kb.row(_adm("💲 Даёт скидку", "promo_kind_disc"))
     kb.row(_adm("✖️ Отмена", "refresh"))
+    return kb.as_markup()
+
+
+def watch_hit(anime_id: int) -> InlineKeyboardMarkup:
+    """Кнопка из уведомления «появилось» — сразу в карточку тайтла."""
+    kb = InlineKeyboardBuilder()
+    kb.row(_nav("▶️ Смотреть", "anime", i=anime_id))
+    kb.row(_nav("🏠 В меню", "menu"))
+    return kb.as_markup()
+
+
+def not_found(query_known: bool = False) -> InlineKeyboardMarkup:
+    """Экран «не нашлось»: подписаться на появление."""
+    kb = InlineKeyboardBuilder()
+    if query_known:
+        kb.row(InlineKeyboardButton(text="🔔 Уже в списке ожидания", callback_data="noop"))
+    else:
+        kb.row(_nav("🔔 Сообщить, когда появится", "wantit"))
+    kb.row(_nav("📚 Каталог", "catalog"), _nav("🏠 В меню", "menu"))
     return kb.as_markup()

@@ -72,6 +72,18 @@ async def nav_suggest(call: CallbackQuery, db: Database, state: FSMContext):
     await show(call, text + "\n\n" + t.SUGGEST_ASK, markup)
 
 
+async def _also_watch(db: Database, user_id: int, row, suggestion_id: int) -> None:
+    """Проголосовал — значит хочет посмотреть. Подписываем на появление.
+
+    Отдельной кнопки не нужно: голос и есть заявка. Отписаться можно,
+    просто не голосуя, а уведомление приходит один раз.
+    """
+    title = row["title"] if row is not None else ""
+    if not title:
+        return
+    await db.add_watch(user_id, title, normalize(title), suggestion_id)
+
+
 @router.callback_query(kb.Nav.filter(F.to == "sgvote"))
 async def nav_vote(call: CallbackQuery, callback_data: kb.Nav, db: Database):
     row = await db.get_suggestion(callback_data.i)
@@ -79,9 +91,12 @@ async def nav_vote(call: CallbackQuery, callback_data: kb.Nav, db: Database):
         await call.answer("Предложение уже закрыли", show_alert=True)
         return
     added = await db.vote(callback_data.i, call.from_user.id)
+    await _also_watch(db, call.from_user.id, row, callback_data.i)
     votes = await db.votes_of(callback_data.i)
     await call.answer(
-        f"Голос учтён · {votes}" if added else f"Ты уже голосовал · {votes}"
+        f"Голос учтён · {votes} · сообщу, когда появится"
+        if added
+        else f"Ты уже голосовал · {votes}"
     )
     text, markup = await _board(db, call.from_user.id)
     await show(call, text, markup)
@@ -102,6 +117,7 @@ async def nav_pick(
     if raw:
         await db.add_alias(callback_data.i, normalize(raw))
     added = await db.vote(callback_data.i, call.from_user.id)
+    await _also_watch(db, call.from_user.id, row, callback_data.i)
     votes = await db.votes_of(callback_data.i)
     await state.update_data({PENDING: ""})
 
@@ -125,6 +141,7 @@ async def nav_new(
         return
     suggestion_id = await db.add_suggestion(raw, normalize(raw))
     await db.vote(suggestion_id, call.from_user.id)
+    await db.add_watch(call.from_user.id, raw, normalize(raw), suggestion_id)
     await state.update_data({PENDING: ""})
     await _announce(call.bot, cfg, db, raw, suggestion_id, call.from_user.id)
 
@@ -148,6 +165,7 @@ async def got_text(
     if known is not None:
         row = await db.get_suggestion(known)
         added = await db.vote(known, message.from_user.id)
+        await _also_watch(db, message.from_user.id, row, known)
         votes = await db.votes_of(known)
         text = (
             t.SUGGEST_VOTED.format(title=row["title"], votes=votes)
@@ -163,6 +181,10 @@ async def got_text(
     if best is not None:
         await db.add_alias(best.candidate.id, normalize(raw))
         added = await db.vote(best.candidate.id, message.from_user.id)
+        await db.add_watch(
+            message.from_user.id, best.candidate.title,
+            normalize(best.candidate.title), best.candidate.id,
+        )
         votes = await db.votes_of(best.candidate.id)
         text = (
             t.SUGGEST_VOTED.format(title=best.candidate.title, votes=votes)
@@ -183,6 +205,7 @@ async def got_text(
 
     suggestion_id = await db.add_suggestion(raw, normalize(raw))
     await db.vote(suggestion_id, message.from_user.id)
+    await db.add_watch(message.from_user.id, raw, normalize(raw), suggestion_id)
     await _announce(message.bot, cfg, db, raw, suggestion_id, message.from_user.id)
     board, markup = await _board(db, message.from_user.id)
     await message.answer(
