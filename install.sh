@@ -8,7 +8,7 @@
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/zfd430792-coder/Vpn-.git}"
-REPO_BRANCH="${REPO_BRANCH:-claude/project-complete-removal-sd6wgq}"
+REPO_BRANCH="${REPO_BRANCH:-claude/traffic-consuming-bot-iuxyrf}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/anime-bot}"
 ENV_DIR="${ENV_DIR:-/etc/anime-bot}"
 DATA_DIR="${DATA_DIR:-/var/lib/anime-bot}"

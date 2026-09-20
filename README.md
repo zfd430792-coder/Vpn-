@@ -8,7 +8,7 @@
 ## Установка одной командой
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zfd430792-coder/Vpn-/claude/project-complete-removal-sd6wgq/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/zfd430792-coder/Vpn-/claude/traffic-consuming-bot-iuxyrf/install.sh | sudo bash
 ```
 
 Спросит четыре вещи: токен бота от [@BotFather](https://t.me/BotFather), твой
