@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -25,22 +25,6 @@ async def _greeting(db: Database) -> str:
 async def cmd_start(message: Message, db: Database, state: FSMContext, is_admin: bool = False):
     await state.clear()
     await message.answer(await _greeting(db), reply_markup=kb.main_menu(is_admin))
-
-
-@router.message(Command("help"))
-async def cmd_help(message: Message, is_admin: bool = False):
-    await message.answer(t.HELP, reply_markup=kb.main_menu(is_admin))
-
-
-@router.message(Command("menu"))
-async def cmd_menu(message: Message, db: Database, state: FSMContext, is_admin: bool = False):
-    await state.clear()
-    await message.answer(await _greeting(db), reply_markup=kb.main_menu(is_admin))
-
-
-@router.message(Command("id"))
-async def cmd_id(message: Message):
-    await message.answer(f"🆔 Твой ID: <code>{message.from_user.id}</code>")
 
 
 @router.callback_query(kb.Nav.filter(F.to == "menu"))
@@ -79,3 +63,17 @@ async def nav_profile(call: CallbackQuery, db: Database, cfg: Config):
 @router.callback_query(F.data == "noop")
 async def noop(call: CallbackQuery):
     await call.answer()
+
+
+@router.message(F.chat.type == "private", F.text.startswith("/"))
+async def any_command(message: Message, db: Database, state: FSMContext, is_admin: bool = False):
+    """Команд у бота нет — что бы ни набрали со слешем, показываем меню.
+
+    Заодно это выход из любого пошагового ввода: набрал что-то со слешем —
+    значит передумал.
+    """
+    await state.clear()
+    await message.answer(
+        "🍿 Управление тут кнопками — команды не нужны.\n\n" + await _greeting(db),
+        reply_markup=kb.main_menu(is_admin),
+    )

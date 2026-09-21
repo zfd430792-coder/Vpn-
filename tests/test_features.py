@@ -205,6 +205,38 @@ async def main():
         check("процент верный", created and created["percent"] == 25, created and created["percent"])
         check("лимит верный", created and created["max_uses"] == 10)
 
+    print("\n[6б] Возврат звёзд кнопками")
+    pay_id = await db.add_payment(USER2.id, "month", 150, "charge_test")
+    await db.grant_sub(USER2.id, 30)
+    if await feed(cb(kb.Adm(act="payments").pack(), user=ADMIN), "список платежей"):
+        check("платежи показаны", any("Последние платежи" in t for t in session.texts()))
+        check("платёж кнопкой", any("150⭐" in b for b in session.buttons()), session.buttons())
+    if await feed(cb(kb.Adm(act="pay_one", arg=pay_id).pack(), user=ADMIN), "карточка платежа"):
+        check("карточка открылась", any(f"Платёж #{pay_id}" in t for t in session.texts()),
+              session.texts())
+        check("есть кнопка возврата", any("Вернуть звёзды" in b for b in session.buttons()),
+              session.buttons())
+    if await feed(cb(kb.Adm(act="refund_ask", arg=pay_id).pack(), user=ADMIN), "спросил подтверждение"):
+        check("спросил подтверждение", any("Вернуть <b>150</b>" in t for t in session.texts()),
+              session.texts())
+    if await feed(cb(kb.Adm(act="refund_do", arg=pay_id).pack(), user=ADMIN), "возврат"):
+        check("вызван возврат у Telegram",
+              any(n == "RefundStarPayment" for n, _ in session.calls),
+              [n for n, _ in session.calls])
+        check("подписка снята", not await db.has_sub(USER2.id))
+        rows = [r for r in await db.last_payments(50) if r["id"] == pay_id]
+        check("платёж помечен возвращённым", rows and rows[0]["refunded"] == 1,
+              rows and rows[0]["refunded"])
+    if await feed(cb(kb.Adm(act="refund_do", arg=pay_id).pack(), user=ADMIN), "повторный возврат"):
+        check("повторно не возвращает",
+              not any(n == "RefundStarPayment" for n, _ in session.calls),
+              [n for n, _ in session.calls])
+
+    print("\n[6в] Заливка с диска без юзербота")
+    if await feed(cb(kb.Adm(act="pull").pack(), user=ADMIN), "кнопка заливки с диска"):
+        check("честно отказался, а не завис",
+              not any("путь к файлу" in t for t in session.texts()), session.texts())
+
     print("\n[7] Админ видит предложения")
     if await feed(cb(kb.Adm(act="sugg").pack(), user=ADMIN), "список предложений"):
         check("список показан", any("Предложения" in t for t in session.texts()))

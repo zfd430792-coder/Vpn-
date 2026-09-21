@@ -247,7 +247,7 @@ def admin_panel() -> InlineKeyboardMarkup:
     kb.row(_adm("📣 Рассылка", "broadcast"), _adm("⭐ Выдать подписку", "grant"))
     kb.row(_adm("🚫 Бан / разбан", "ban"), _adm("💰 Платежи", "payments"))
     kb.row(_adm("💡 Предложения", "sugg"), _adm("🎟 Промокоды", "promos"))
-    kb.row(_adm("🔎 Проверить тайтлы", "scan"))
+    kb.row(_adm("🔎 Проверить тайтлы", "scan"), _adm("📥 С диска", "pull"))
     kb.row(_adm("⚙️ Настройки", "settings"), _adm("🔄 Обновить", "refresh"))
     kb.row(_nav("🏠 В меню", "menu"))
     return kb.as_markup()
@@ -390,4 +390,34 @@ def not_found(query_known: bool = False) -> InlineKeyboardMarkup:
     else:
         kb.row(_nav("🔔 Сообщить, когда появится", "wantit"))
     kb.row(_nav("📚 Каталог", "catalog"), _nav("🏠 В меню", "menu"))
+    return kb.as_markup()
+
+
+def admin_payments(rows: list) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in rows:
+        mark = "↩️" if row["refunded"] else "✅"
+        kb.row(
+            _adm(
+                f"{mark} {row['stars']}⭐ · {row['plan']} · {row['user_id']}"[:60],
+                "pay_one",
+                arg=row["id"],
+            )
+        )
+    kb.row(_adm("⬅️ В админку", "refresh"))
+    return kb.as_markup()
+
+
+def admin_payment_one(payment_id: int, refunded: bool) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if not refunded:
+        kb.row(_adm("↩️ Вернуть звёзды", "refund_ask", arg=payment_id))
+    kb.row(_adm("⬅️ К платежам", "payments"))
+    return kb.as_markup()
+
+
+def admin_refund_confirm(payment_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(_adm("↩️ Да, вернуть", "refund_do", arg=payment_id))
+    kb.row(_adm("⬅️ Отмена", "pay_one", arg=payment_id))
     return kb.as_markup()

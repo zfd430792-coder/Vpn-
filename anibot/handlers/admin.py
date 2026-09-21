@@ -7,10 +7,11 @@ import contextlib
 import logging
 import re
 import secrets
+import time
+from pathlib import Path
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
@@ -47,6 +48,7 @@ class AdminFSM(StatesGroup):
     up_episode = State()
     up_dub = State()
     up_quality = State()
+    pull_path = State()
 
 
 def _admin_only(cfg: Config, user_id: int) -> bool:
@@ -58,14 +60,6 @@ async def _panel_text(db: Database) -> str:
 
 
 # ---------- вход в панель ----------
-
-
-@router.message(Command("admin"))
-async def cmd_admin(message: Message, db: Database, cfg: Config, state: FSMContext):
-    if not _admin_only(cfg, message.from_user.id):
-        return
-    await state.clear()
-    await message.answer(await _panel_text(db), reply_markup=kb.admin_panel())
 
 
 @router.callback_query(kb.Nav.filter(F.to == "admin"))
@@ -184,7 +178,8 @@ async def adm_rename_save(message: Message, db: Database, state: FSMContext):
 
 @router.message(F.video | F.document | F.animation)
 async def adm_upload(
-    message: Message, db: Database, cfg: Config, state: FSMContext, bot: Bot
+    message: Message, db: Database, cfg: Config, state: FSMContext, bot: Bot,
+    userbot: Userbot
 ):
     """Админ прислал видео в личку — разбираем подпись или спрашиваем по шагам."""
     if not _admin_only(cfg, message.from_user.id):
@@ -202,7 +197,7 @@ async def adm_upload(
 
     parsed = parser.parse(message.caption or "")
     if parsed:
-        await _save_upload(message, db, cfg, state, bot, parsed)
+        await _save_upload(message, db, cfg, state, bot, parsed, userbot)
         return
 
     await state.set_state(AdminFSM.up_title)
@@ -260,7 +255,8 @@ async def adm_up_dub(message: Message, state: FSMContext):
 
 @router.message(AdminFSM.up_quality)
 async def adm_up_quality(
-    message: Message, db: Database, cfg: Config, state: FSMContext, bot: Bot
+    message: Message, db: Database, cfg: Config, state: FSMContext, bot: Bot,
+    userbot: Userbot
 ):
     raw = (message.text or "").strip()
     quality, _rest = parser.quality_of(raw) if raw not in {"-", ""} else (
@@ -275,7 +271,7 @@ async def adm_up_quality(
         dub=data.get("dub", parser.DEFAULT_DUB),
         quality=quality,
     )
-    await _save_upload(message, db, cfg, state, bot, parsed)
+    await _save_upload(message, db, cfg, state, bot, parsed, userbot)
 
 
 async def _save_upload(
@@ -285,14 +281,24 @@ async def _save_upload(
     state: FSMContext,
     bot: Bot,
     parsed: parser.Parsed,
+    userbot: Userbot | None = None,
 ) -> None:
-    """Копирует присланное видео в канал-хранилище и пишет строку в базу."""
+    """Кладёт серию в канал-хранилище и пишет строку в базу.
+
+    Два источника: присланное в личку видео копируется ботом, а файл с диска
+    сервера заливает юзербот — у бота на это лимит 50 МБ.
+    """
     data = await state.get_data()
     src_chat = data.get("src_chat", message.chat.id)
     src_msg = data.get("src_msg", message.message_id)
+    pull_path = data.get("pull_path")
 
     if not cfg.storage_channel:
-        await message.answer("⚠️ STORAGE_CHANNEL не настроен — запусти <code>python -m anibot.setup</code>")
+        await message.answer(
+            "⚠️ Хранилище не назначено.\n\n"
+            "Добавь меня администратором в свой канал — я сам предложу кнопку "
+            "«Сделать хранилищем»."
+        )
         await state.clear()
         return
 
@@ -303,17 +309,33 @@ async def _save_upload(
         f"Озвучка: {parsed.dub}\n"
         f"Качество: {parsed.quality_name}"
     )
-    try:
-        copied = await bot.copy_message(
-            chat_id=cfg.storage_channel,
-            from_chat_id=src_chat,
-            message_id=src_msg,
-            caption=caption,
-        )
-    except TelegramAPIError as exc:
-        await message.answer(f"⚠️ Не смог положить в канал: <code>{exc}</code>")
-        await state.clear()
-        return
+    if pull_path:
+        if userbot is None or not userbot.configured:
+            await message.answer("⚠️ Для заливки с диска нужен юзербот, а он не настроен.")
+            await state.clear()
+            return
+        status = await message.answer("📤 Заливаю юзерботом, это небыстро…")
+        message_id = await userbot.upload(cfg.storage_channel, pull_path, caption)
+        if message_id is None:
+            await status.edit_text("⚠️ Не залилось. Проверь путь и сессию юзербота.")
+            await state.clear()
+            return
+        stored_id = message_id
+        file_size = data.get("pull_size", 0)
+    else:
+        try:
+            copied = await bot.copy_message(
+                chat_id=cfg.storage_channel,
+                from_chat_id=src_chat,
+                message_id=src_msg,
+                caption=caption,
+            )
+        except TelegramAPIError as exc:
+            await message.answer(f"⚠️ Не смог положить в канал: <code>{exc}</code>")
+            await state.clear()
+            return
+        stored_id = copied.message_id
+        file_size = data.get("size", 0)
 
     anime_id = await db.add_anime(parsed.title, se.normalize(parsed.title))
     await db.add_episode(
@@ -322,8 +344,8 @@ async def _save_upload(
         number=parsed.episode,
         dub=parsed.dub,
         quality=parsed.quality,
-        message_id=copied.message_id,
-        file_size=data.get("size", 0),
+        message_id=stored_id,
+        file_size=file_size,
         duration=data.get("duration", 0),
     )
     await state.clear()
@@ -458,40 +480,89 @@ async def adm_payments(call: CallbackQuery, db: Database, cfg: Config):
     if not rows:
         await show(call, "💰 Платежей ещё не было.", kb.admin_cancel())
         return
-    lines = [f"💰 <b>Последние платежи</b>\n{t.SEP}"]
-    for row in rows:
-        mark = "↩️" if row["refunded"] else "✅"
-        lines.append(
-            f"{mark} <code>{row['user_id']}</code> · {row['plan']} · {row['stars']} ⭐"
-        )
     total = (await db.stats())["stars"]
-    lines.append(f"\nИтого: <b>{total}</b> ⭐")
-    lines.append("\n<i>Вернуть деньги: /refund ID</i>")
-    await show(call, "\n".join(lines), kb.admin_cancel())
+    text = (
+        f"💰 <b>Последние платежи</b>\n{t.SEP}\n"
+        f"Итого заработано: <b>{total}</b> ⭐\n\n"
+        "Тап по платежу — карточка с возвратом."
+    )
+    await show(call, text, kb.admin_payments(rows))
 
 
-@router.message(Command("refund"))
-async def cmd_refund(message: Message, db: Database, cfg: Config, bot: Bot):
-    """Возврат звёзд по последнему платежу пользователя."""
-    if not _admin_only(cfg, message.from_user.id):
+@router.callback_query(kb.Adm.filter(F.act == "pay_one"))
+async def adm_payment_one(call: CallbackQuery, callback_data: kb.Adm, db: Database, cfg: Config):
+    if not _admin_only(cfg, call.from_user.id):
         return
-    parts = (message.text or "").split()
-    if len(parts) != 2 or not parts[1].isdigit():
-        await message.answer("Формат: <code>/refund ID</code>")
+    rows = [r for r in await db.last_payments(200) if r["id"] == callback_data.arg]
+    if not rows:
+        await show(call, "🤷 Платёж не найден.", kb.admin_cancel())
         return
-    user_id = int(parts[1])
-    row = await db.last_payment_of(user_id)
-    if row is None:
-        await message.answer("У этого пользователя нет платежей к возврату.")
+    row = rows[0]
+    when = time.strftime("%d.%m.%Y %H:%M", time.localtime(row["ts"]))
+    text = (
+        f"💰 <b>Платёж #{row['id']}</b>\n{t.SEP}\n"
+        f"Кто: <code>{row['user_id']}</code>\n"
+        f"Тариф: <b>{row['plan']}</b>\n"
+        f"Сумма: <b>{row['stars']}</b> ⭐\n"
+        f"Когда: {when}\n"
+        f"Статус: {'↩️ возвращён' if row['refunded'] else '✅ оплачен'}"
+    )
+    await show(call, text, kb.admin_payment_one(row["id"], bool(row["refunded"])))
+
+
+@router.callback_query(kb.Adm.filter(F.act == "refund_ask"))
+async def adm_refund_ask(call: CallbackQuery, callback_data: kb.Adm, db: Database, cfg: Config):
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    rows = [r for r in await db.last_payments(200) if r["id"] == callback_data.arg]
+    if not rows:
+        return
+    row = rows[0]
+    await show(
+        call,
+        f"↩️ Вернуть <b>{row['stars']}</b> ⭐ пользователю "
+        f"<code>{row['user_id']}</code>?\n\n"
+        "Подписка при этом снимется.",
+        kb.admin_refund_confirm(row["id"]),
+    )
+
+
+@router.callback_query(kb.Adm.filter(F.act == "refund_do"))
+async def adm_refund_do(
+    call: CallbackQuery, callback_data: kb.Adm, db: Database, cfg: Config, bot: Bot
+):
+    """Возврат звёзд по конкретному платежу."""
+    if not _admin_only(cfg, call.from_user.id):
+        return
+    rows = [r for r in await db.last_payments(200) if r["id"] == callback_data.arg]
+    if not rows:
+        return
+    row = rows[0]
+    if row["refunded"]:
+        await call.answer("Этот платёж уже возвращён", show_alert=True)
         return
     try:
-        await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=row["charge_id"])
+        await bot.refund_star_payment(
+            user_id=row["user_id"], telegram_payment_charge_id=row["charge_id"]
+        )
     except TelegramAPIError as exc:
-        await message.answer(f"⚠️ Возврат не прошёл: <code>{exc}</code>")
+        await call.answer("Возврат не прошёл", show_alert=True)
+        await show(call, f"⚠️ Возврат не прошёл:\n<code>{exc}</code>", kb.admin_cancel())
         return
+
     await db.mark_refunded(row["charge_id"])
-    await db.revoke_sub(user_id)
-    await message.answer(f"↩️ Вернул <b>{row['stars']}</b> ⭐ пользователю <code>{user_id}</code>")
+    await db.revoke_sub(row["user_id"])
+    await call.answer("Вернул")
+    with contextlib.suppress(TelegramAPIError):
+        await bot.send_message(
+            row["user_id"],
+            f"↩️ Тебе вернули <b>{row['stars']}</b> ⭐. Подписка снята.",
+        )
+    await show(
+        call,
+        f"↩️ Вернул <b>{row['stars']}</b> ⭐ пользователю <code>{row['user_id']}</code>.",
+        kb.admin_panel(),
+    )
 
 
 # ---------- настройки ----------
@@ -636,44 +707,37 @@ async def adm_set_price_do(message: Message, db: Database, state: FSMContext):
 # ---------- сервисные команды ----------
 
 
-@router.message(Command("stats"))
-async def cmd_stats(message: Message, db: Database, cfg: Config):
-    if not _admin_only(cfg, message.from_user.id):
+@router.callback_query(kb.Adm.filter(F.act == "pull"))
+async def adm_pull(call: CallbackQuery, cfg: Config, userbot: Userbot, state: FSMContext):
+    """Заливка файла, который уже лежит на диске сервера. Нужен юзербот."""
+    if not _admin_only(cfg, call.from_user.id):
         return
-    await message.answer(await _panel_text(db), reply_markup=kb.admin_panel())
-
-
-@router.message(Command("pull"))
-async def cmd_pull(
-    message: Message, db: Database, cfg: Config, userbot: Userbot, bot: Bot
-):
-    """Залить файл с диска сервера юзерботом: /pull /путь | Название | сезон | серия | озвучка"""
-    if not _admin_only(cfg, message.from_user.id):
+    if not userbot.configured:
+        await call.answer("Нужен юзербот — он не настроен", show_alert=True)
         return
-    raw = (message.text or "").split(maxsplit=1)
-    if len(raw) < 2 or "|" not in raw[1]:
-        await message.answer(
-            "Формат:\n<code>/pull /путь/к/файлу | Название | 1 | 7 | Studio Band</code>"
-        )
-        return
-    parts = [p.strip() for p in raw[1].split("|")]
-    if len(parts) < 5:
-        await message.answer("Нужно пять частей: путь, название, сезон, серия, озвучка.")
-        return
-    path, title, season, number, dub = parts[0], parts[1], parts[2], parts[3], parts[4]
-
-    status = await message.answer("📤 Заливаю юзерботом, это небыстро…")
-    caption = f"Название: {title}\nСезон: {season}\nСерия: {number}\nОзвучка: {dub}"
-    message_id = await userbot.upload(cfg.storage_channel, path, caption)
-    if message_id is None:
-        await status.edit_text("⚠️ Не залилось. Проверь путь и сессию юзербота.")
-        return
-
-    anime_id = await db.add_anime(title, se.normalize(title))
-    await db.add_episode(
-        anime_id, parser.as_int(season, 1) or 1, parser.as_int(number), dub, message_id
+    await state.set_state(AdminFSM.pull_path)
+    await show(
+        call,
+        "📥 <b>Залить с диска сервера</b>\n"
+        f"{t.SEP}\n"
+        "Пришли путь к файлу, например:\n"
+        "<code>/srv/video/alpha_s01e07.mkv</code>",
+        kb.admin_cancel(),
     )
-    await status.edit_text(f"✅ Залито: <b>{title}</b> S{season}E{number} · {dub}")
+
+
+@router.message(AdminFSM.pull_path)
+async def adm_pull_path(message: Message, state: FSMContext):
+    path = (message.text or "").strip()
+    if not path or not Path(path).exists():
+        await message.answer("Такого файла нет. Пришли существующий путь.")
+        return
+    size = Path(path).stat().st_size
+    await state.update_data(pull_path=path, pull_size=size)
+    await state.set_state(AdminFSM.up_title)
+    await message.answer(
+        f"✅ Файл найден: <b>{t.human_size(size)}</b>\n\nКак называется аниме?"
+    )
 
 
 # ---------- предложения ----------
@@ -935,13 +999,3 @@ async def adm_scan(call: CallbackQuery, db: Database, cfg: Config):
     await show(call, "\n".join(lines), kb.admin_panel())
 
 
-@router.message(Command("scan"))
-async def cmd_scan(message: Message, db: Database, cfg: Config):
-    if not _admin_only(cfg, message.from_user.id):
-        return
-    found, sent, closed = await watchlist.full_scan(message.bot, db)
-    await message.answer(
-        f"🔎 Нашлось: <b>{found}</b>, уведомлено: <b>{sent}</b>, "
-        f"закрыто предложений: <b>{len(closed)}</b>",
-        reply_markup=kb.admin_panel(),
-    )

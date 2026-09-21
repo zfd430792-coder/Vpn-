@@ -5,8 +5,8 @@
 человеку. Вся переписка с одним человеком всегда в одном месте.
 
 Если тем нет (Telegram их не дал или служебная группа не настроена),
-обращения уходят админам в личку, а ответить можно командой
-/reply <id> <текст> — она работает в любом случае.
+обращения уходят админам в личку с кнопкой «Ответить» — работает в любом
+случае. Команд у бота нет, всё управление кнопками.
 """
 
 from __future__ import annotations
@@ -16,10 +16,13 @@ import logging
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import StateFilter
+from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (CallbackQuery, InlineKeyboardButton,
+                           InlineKeyboardMarkup, Message)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .. import keyboards as kb
 from .. import notify
@@ -34,6 +37,30 @@ router = Router(name="support")
 
 class SupportFSM(StatesGroup):
     waiting = State()
+    answering = State()
+
+
+class Sup(CallbackData, prefix="sp"):
+    """Действия админа по обращению. uid — чей это тикет."""
+
+    act: str  # close | reply
+    uid: int
+
+
+def _admin_kb(user_id: int, with_reply: bool = False) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if with_reply:
+        kb.row(
+            InlineKeyboardButton(
+                text="✍️ Ответить", callback_data=Sup(act="reply", uid=user_id).pack()
+            )
+        )
+    kb.row(
+        InlineKeyboardButton(
+            text="✅ Закрыть обращение", callback_data=Sup(act="close", uid=user_id).pack()
+        )
+    )
+    return kb.as_markup()
 
 
 def _who(user) -> str:
@@ -67,9 +94,9 @@ async def _ensure_thread(bot: Bot, cfg: Config, db: Database, user) -> int:
         await bot.send_message(
             chat_id,
             f"💬 <b>Новое обращение</b>\n{_who(user)}\n\n"
-            "<i>Отвечай прямо в этой теме — ответ уйдёт человеку.\n"
-            "/close — закрыть обращение.</i>",
+            "<i>Отвечай прямо в этой теме — ответ уйдёт человеку.</i>",
             message_thread_id=thread_id,
+            reply_markup=_admin_kb(user.id),
         )
     return thread_id
 
@@ -81,14 +108,6 @@ async def _ensure_thread(bot: Bot, cfg: Config, db: Database, user) -> int:
 async def nav_support(call: CallbackQuery, state: FSMContext):
     await state.set_state(SupportFSM.waiting)
     await show(call, t.SUPPORT_START, kb.back_to())
-
-
-@router.message(Command("support"))
-async def cmd_support(message: Message, state: FSMContext):
-    if message.chat.type != "private":
-        return
-    await state.set_state(SupportFSM.waiting)
-    await message.answer(t.SUPPORT_START, reply_markup=kb.back_to())
 
 
 @router.message(SupportFSM.waiting, F.chat.type == "private", ~F.text.startswith("/"))
@@ -117,11 +136,15 @@ async def from_user(
             log.warning("Обращение не ушло в группу: %s", exc)
 
     if not delivered:
-        # запасной путь: админам в личку, отвечать через /reply
+        # запасной путь: админам в личку, отвечать кнопкой «Ответить»
         for admin_id in cfg.admins:
             with contextlib.suppress(TelegramAPIError):
-                await bot.send_message(admin_id, f"💬 <b>Вопрос</b>\n{_who(user)}")
                 await bot.copy_message(admin_id, message.chat.id, message.message_id)
+                await bot.send_message(
+                    admin_id,
+                    f"💬 <b>Вопрос</b>\n{_who(user)}",
+                    reply_markup=_admin_kb(user.id, with_reply=True),
+                )
                 delivered = True
 
     if not delivered:
@@ -134,38 +157,54 @@ async def from_user(
 # ---------- сторона админа ----------
 
 
-@router.message(Command("close"), F.chat.type.in_({"group", "supergroup"}))
-async def close_ticket(message: Message, db: Database, cfg: Config, bot: Bot):
-    if not cfg.is_admin(message.from_user.id):
+@router.callback_query(Sup.filter(F.act == "close"))
+async def close_ticket(call: CallbackQuery, callback_data: Sup, db: Database, cfg: Config, bot: Bot):
+    if not cfg.is_admin(call.from_user.id):
+        await call.answer("Недоступно", show_alert=True)
         return
-    thread_id = message.message_thread_id or 0
-    ticket = await db.ticket_by_thread(thread_id) if thread_id else None
-    if ticket is None:
-        await message.reply("Это не тема обращения.")
-        return
-    await db.close_ticket(ticket["user_id"])
-    await message.reply("✅ Закрыл.")
+    await db.close_ticket(callback_data.uid)
+    await call.answer("Закрыл")
     with contextlib.suppress(TelegramAPIError):
-        await bot.send_message(ticket["user_id"], t.SUPPORT_CLOSED)
+        await call.message.edit_text(
+            f"✅ <b>Обращение закрыто</b>\n<code>{callback_data.uid}</code>"
+        )
+    with contextlib.suppress(TelegramAPIError):
+        await bot.send_message(callback_data.uid, t.SUPPORT_CLOSED)
 
 
-@router.message(Command("reply"), F.chat.type == "private")
-async def cmd_reply(message: Message, db: Database, cfg: Config, bot: Bot):
-    """Ответ без тем: /reply <id> <текст>."""
-    if not cfg.is_admin(message.from_user.id):
+@router.callback_query(Sup.filter(F.act == "reply"))
+async def reply_start(call: CallbackQuery, callback_data: Sup, cfg: Config, state: FSMContext):
+    """Ответ из личного чата — когда тем нет и отвечать в теме некуда."""
+    if not cfg.is_admin(call.from_user.id):
+        await call.answer("Недоступно", show_alert=True)
         return
-    parts = (message.text or "").split(maxsplit=2)
-    if len(parts) < 3 or not parts[1].isdigit():
-        await message.answer("Формат: <code>/reply ID текст</code>")
+    await state.set_state(SupportFSM.answering)
+    await state.update_data(answer_to=callback_data.uid)
+    await call.answer()
+    await call.message.answer(
+        f"✍️ Пришли ответ для <code>{callback_data.uid}</code> одним сообщением."
+    )
+
+
+@router.message(SupportFSM.answering, F.chat.type == "private")
+async def reply_send(message: Message, db: Database, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    user_id = int(data.get("answer_to", 0))
+    if not user_id:
+        await state.clear()
         return
-    user_id, text = int(parts[1]), parts[2]
     try:
-        await bot.send_message(user_id, f"{t.SUPPORT_REPLY}\n{text}")
+        if message.text:
+            await bot.send_message(user_id, f"{t.SUPPORT_REPLY}\n{message.text}")
+        else:
+            await bot.send_message(user_id, t.SUPPORT_REPLY)
+            await bot.copy_message(user_id, message.chat.id, message.message_id)
     except TelegramAPIError as exc:
         await message.answer(f"⚠️ Не доставил: <code>{exc}</code>")
         return
     await db.touch_ticket(user_id)
-    await message.answer("✅ Ответ отправлен.")
+    await state.clear()
+    await message.answer("✅ Ответ отправлен.", reply_markup=kb.main_menu(True))
 
 
 @router.message(

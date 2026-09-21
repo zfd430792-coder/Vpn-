@@ -119,7 +119,7 @@ async def run() -> None:
     heartbeat = asyncio.create_task(notify.heartbeat_loop(db))
 
     try:
-        await bot.set_my_commands(COMMANDS)
+        await bot.set_my_commands([])  # никаких команд в меню
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:

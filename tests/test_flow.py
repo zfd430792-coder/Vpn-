@@ -210,9 +210,10 @@ async def main():
         check("теперь серия отдаётся", session.last("CopyMessage") is not None)
 
     print("\n[8] Админка")
-    if await feed(msg("/admin", user=ADMIN), "/admin"):
-        sent = session.last("SendMessage")
-        check("панель открылась", sent and "Админка" in sent["text"])
+    if await feed(cb(kb.Nav(to="admin").pack(), user=ADMIN), "кнопка админки"):
+        edited = session.last("EditMessageText")
+        check("панель открылась", edited and "Админка" in edited["text"],
+              edited and edited.get("text"))
     if await feed(cb(kb.Adm(act="titles").pack(), user=ADMIN), "список тайтлов"):
         check("тайтлы показаны", session.last("EditMessageText") is not None)
     if await feed(cb(kb.Adm(act="settings").pack(), user=ADMIN), "настройки"):
@@ -221,6 +222,17 @@ async def main():
     if await feed(cb(kb.Adm(act="titles").pack(), user=USER), "не-админ в админку"):
         check("обычного юзера в админку не пустило",
               session.last("EditMessageText") is None, session.names())
+
+    print("\n[8б] Команд у бота нет")
+    if await feed(msg("/admin", user=ADMIN), "набрал слеш"):
+        sent = session.last("SendMessage")
+        check("на слеш показывается меню",
+              sent and "кнопками" in sent["text"], sent and sent.get("text"))
+        check("это не админка", sent and "Админка" not in sent["text"])
+    if await feed(msg("/чтоугодно"), "произвольный слеш"):
+        sent = session.last("SendMessage")
+        check("любой слеш ведёт в меню", sent and "Аниме-бот" in sent["text"],
+              sent and sent.get("text"))
 
     print("\n[9] Бан")
     await db.set_banned(USER.id, True)

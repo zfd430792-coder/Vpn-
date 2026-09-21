@@ -15,6 +15,7 @@ from aiogram.types import (CallbackQuery, Chat, ForumTopic, Message, MessageId,
                            Update, User)
 
 from anibot import config, handlers, keyboards as kb, parser
+from anibot.handlers.support import Sup
 from anibot.db import Database
 from anibot.middlewares import Deps
 from anibot.search import normalize
@@ -229,12 +230,20 @@ async def main():
     if await feed(group_msg, "название тайтла в группе"):
         check("бот не отвечает поиском в группе", not session.calls, session.calls)
 
-    print("\n[8] Закрытие и запасной путь ответа")
-    if await feed(in_topic("/close", thread), "закрыть обращение"):
+    print("\n[8] Закрытие и ответ — кнопками, без команд")
+    if await feed(cb(Sup(act="close", uid=USER.id).pack(), user=ADMIN), "кнопка закрытия"):
         row = await db.ensure_ticket(USER.id)
         check("обращение закрыто", row["status"] == "closed", row["status"])
-        check("человеку сообщили", any("закрыто" in t for t in session.texts()))
-    if await feed(dm(f"/reply {USER.id} держи ответ", user=ADMIN), "ответ командой"):
+        check("человеку сообщили",
+              any("закрыто" in t for t in session.texts()), session.texts())
+    if await feed(cb(Sup(act="close", uid=USER.id).pack(), user=USER), "юзер жмёт закрытие"):
+        check("обычный юзер закрыть не может",
+              not any("Обращение закрыто" in t for t in session.texts()), session.texts())
+
+    if await feed(cb(Sup(act="reply", uid=USER.id).pack(), user=ADMIN), "кнопка ответа"):
+        check("спросил текст ответа",
+              any("Пришли ответ" in t for t in session.texts()), session.texts())
+    if await feed(dm("держи ответ", user=ADMIN), "текст ответа"):
         sent = [p for p in session.all_of("SendMessage") if p["chat_id"] == USER.id]
         check("ответ дошёл", sent and "держи ответ" in sent[0]["text"], sent)
 
