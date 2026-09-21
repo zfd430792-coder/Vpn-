@@ -76,8 +76,10 @@ async def check_channel(bot, bot_id: int, cfg: config.Config) -> None:
 
     if not cfg.storage_channel:
         bad(
-            "STORAGE_CHANNEL не задан — боту неоткуда брать серии",
-            "запусти: python -m anibot.setup",
+            "хранилище не назначено — боту неоткуда брать серии",
+            "добавь бота администратором в свой канал: он сам напишет тебе "
+            "и предложит кнопку «Сделать хранилищем». Либо, если настроен "
+            "юзербот: python -m anibot.setup",
         )
         return
     try:
@@ -104,10 +106,18 @@ async def check_channel(bot, bot_id: int, cfg: config.Config) -> None:
 
 
 async def check_userbot(cfg: config.Config) -> None:
+    if not cfg.api_id and not cfg.api_hash:
+        warn(
+            "юзербот не настроен",
+            "это нормально, если заливаешь тайтлы вручную со своего аккаунта: "
+            "бот отдаёт серии сам. Юзербот нужен только для /pull с диска "
+            "сервера и автосоздания каналов.",
+        )
+        return
     if not cfg.api_id or not cfg.api_hash:
         bad(
-            "API_ID / API_HASH не заданы — большие файлы заливать будет нечем",
-            "возьми на my.telegram.org → API development tools",
+            "задано только одно из API_ID / API_HASH",
+            "впиши оба или оставь оба пустыми",
         )
         return
     good(f"API_ID задан ({cfg.api_id}), API_HASH задан")

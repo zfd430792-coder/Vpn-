@@ -30,8 +30,8 @@ async def main():
     handlers.setup(dp)
     names = [r.name for r in dp.sub_routers]
     check("роутеры подключены в нужном порядке",
-          names == ["admin", "subscription", "start", "support", "suggestions",
-                    "watch", "catalog", "channel"], names)
+          names == ["attach", "admin", "subscription", "start", "support",
+                    "suggestions", "watch", "catalog", "channel"], names)
     used = dp.resolve_used_update_types()
     check("бот слушает channel_post", "channel_post" in used, used)
     check("бот слушает pre_checkout_query", "pre_checkout_query" in used, used)

@@ -176,9 +176,32 @@ done
 ask_value ADMINS "Твой Telegram ID (узнать: @userinfobot)" extract_digits valid_id \
   "нужен числовой ID, а не @имя — напиши @userinfobot, он пришлёт"
 
-info "API_ID и API_HASH берутся на my.telegram.org → API development tools"
-ask_value API_ID   "API_ID"   extract_digits valid_apiid "API_ID — это число"
-ask_value API_HASH "API_HASH" extract_hash   valid_hash  "API_HASH — 32 знака: цифры и буквы a–f"
+# Юзербот нужен только двум вещам: заливать файлы с диска сервера и
+# создавать каналы автоматически. Если заливать тайтлы вручную со своего
+# аккаунта — он не участвует ни в выдаче, ни в чём ещё.
+WITH_USERBOT="${WITH_USERBOT:-}"
+if [[ -z "$WITH_USERBOT" ]]; then
+  echo
+  info "Юзербот нужен, только если хочешь заливать файлы с диска сервера"
+  info "и чтобы каналы создались сами. Если заливаешь тайтлы вручную со"
+  info "своего аккаунта — он не нужен: бот отдаёт серии сам."
+  printf "%b" "  ${CYN}?${OFF} Настроить юзербота? (y/N): " > /dev/tty
+  read -r answer < /dev/tty || answer=""
+  case "$(sanitize "$answer")" in
+    y|Y|yes|д|да|Д|ДА) WITH_USERBOT=1 ;;
+    *) WITH_USERBOT=0 ;;
+  esac
+fi
+
+if [[ "$WITH_USERBOT" == "1" ]]; then
+  info "API_ID и API_HASH берутся на my.telegram.org → API development tools"
+  ask_value API_ID   "API_ID"   extract_digits valid_apiid "API_ID — это число"
+  ask_value API_HASH "API_HASH" extract_hash   valid_hash  "API_HASH — 32 знака: цифры и буквы a–f"
+else
+  API_ID=""
+  API_HASH=""
+  info "без юзербота: канал назначишь кнопкой прямо в боте"
+fi
 
 # ----------------------------------------------------------------- 5. env
 step "Пишу ${ENV_DIR}/env"
@@ -213,18 +236,23 @@ chmod 600 "$ENV_DIR/env"
 info "права 600 — токены внутри"
 
 # ------------------------------------------------------- 6. вход юзербота
-step "Вход юзербота и создание канала"
-info "сейчас Telegram пришлёт код на аккаунт — введи его"
-echo
-set +e
-( set -a; . "$ENV_DIR/env"; set +a; \
-  ENV_FILE="$ENV_DIR/env" "$INSTALL_DIR/.venv/bin/python" -m anibot.setup ) < /dev/tty
-SETUP_RC=$?
-set -e
-echo
-if [[ $SETUP_RC -ne 0 ]]; then
-  warn "Юзербот не настроен. Бот запустится, но канал надо будет завести руками:"
-  warn "  cd $INSTALL_DIR && ENV_FILE=$ENV_DIR/env .venv/bin/python -m anibot.setup"
+if [[ "$WITH_USERBOT" == "1" ]]; then
+  step "Вход юзербота и создание каналов"
+  info "войти можно по QR-коду — он появится ниже"
+  echo
+  set +e
+  ( set -a; . "$ENV_DIR/env"; set +a; \
+    ENV_FILE="$ENV_DIR/env" "$INSTALL_DIR/.venv/bin/python" -m anibot.setup ) < /dev/tty
+  SETUP_RC=$?
+  set -e
+  echo
+  if [[ $SETUP_RC -ne 0 ]]; then
+    warn "Юзербот не настроен. Бот запустится, но каналы надо будет назначить"
+    warn "кнопкой в боте — просто добавь его админом в канал."
+  fi
+else
+  step "Канал назначим из бота"
+  info "юзербот не настраивается — файлы заливаешь сам"
 fi
 
 # ------------------------------------------------------------- 7. systemd
@@ -317,12 +345,24 @@ if systemctl is-active --quiet "${SERVICE}.service"; then
    ${B}Рестарт:${OFF}    systemctl restart ${SERVICE}
    ${B}Настройки:${OFF}  ${ENV_DIR}/env
 
-   ${DIM}Открой бота, нажми /start — там будет кнопка «Админка».
-   Заливай серии в канал с подписью:${OFF}
+   ${DIM}Открой бота, нажми /start — там будет кнопка «Админка».${OFF}
+
+"
+  if [[ -z "$CHANNEL" ]]; then
+    printf "%b" "   ${B}Дальше — назначь хранилище:${OFF}
+   ${DIM}1. Создай приватный канал в Telegram.
+   2. Добавь туда бота администратором.
+   3. Бот сам напишет тебе и предложит кнопку «Сделать хранилищем».
+   4. Так же можно назначить служебную группу.${OFF}
+
+"
+  fi
+  printf "%b" "   ${DIM}Заливай серии в хранилище с подписью:${OFF}
        Название: Моё Аниме
        Сезон: 1
        Серия: 7
        Озвучка: Studio Band
+       Качество: 4к
 
 "
 else

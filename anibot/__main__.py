@@ -44,6 +44,33 @@ async def seed_settings(db: Database, cfg: config.Config) -> None:
             await db.set_setting(f"price_{code}", str(stars))
 
 
+async def apply_saved_chats(db: Database, cfg: config.Config) -> None:
+    """Каналы, назначенные из самого бота, важнее того, что в env.
+
+    Так их можно выдать боту кнопкой, не редактируя файл и не перезапуская
+    сервис руками.
+    """
+    saved = await db.get_int_setting("storage_channel", 0)
+    if saved:
+        cfg.storage_channel = saved
+    group = await db.get_int_setting("service_group", 0)
+    if group:
+        cfg.service_group = group
+        for purpose, key in (
+            ("suggestions", "chat_suggestions"),
+            ("payments", "chat_payments"),
+            ("stats", "chat_stats"),
+            ("logs", "chat_logs"),
+            ("support", "chat_support"),
+        ):
+            raw = await db.get_setting(key)
+            if not raw:
+                continue
+            chat, _, thread = raw.partition(":")
+            with contextlib.suppress(ValueError):
+                cfg.notify[purpose] = (int(chat), int(thread) if thread else None)
+
+
 async def run() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -64,6 +91,7 @@ async def run() -> None:
     db = Database(cfg.db_path)
     await db.connect()
     await seed_settings(db, cfg)
+    await apply_saved_chats(db, cfg)
     log.info("База: %s", cfg.db_path)
 
     userbot = Userbot(cfg.api_id, cfg.api_hash, cfg.session)
