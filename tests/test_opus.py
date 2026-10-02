@@ -8,7 +8,6 @@ sys.path.insert(0, str(HERE))
 
 import ogg
 from voicebot import clients, opus
-from voicebot.handlers import verdict
 
 FAILS = []
 def check(label, cond, extra=""):
@@ -74,35 +73,25 @@ lying = ogg.opus_tags("abc")[:8] + (10_000).to_bytes(4, "little") + b"abc" + b"\
 check("длина строки больше пакета", rejected(b"".join(
     ogg.pages([ogg.opus_head()], serial=5, bos=True) + ogg.pages([lying], serial=5, seq=1))))
 
-print("\n[6] Какой клиент")
+print("\n[6] Какой телефон")
 expect = {
     "libopus 1.5.1": "iPhone",
     "libopus unknown-fixed": "Android",
     "libopus unknown": "Telegram X",
-    "libopus 1.3.1-fixed": "macOS (нативный клиент)",
+    "libopus 1.3.1-fixed": "macOS",
     "Lavf60.16.101": "Telegram Desktop",
     "tweb": "Telegram Web K",
     "telegram-web-a": "Telegram Web A",
 }
 for vendor, client in expect.items():
-    guess = clients.identify(vendor)
-    check(f"{vendor} → {client}", guess == clients.Guess(client, exact=True), guess)
-check("пробелы по краям не мешают", clients.identify(" libopus 1.5.1\n") == clients.Guess("iPhone", True))
+    got = clients.identify(vendor)
+    check(f"{vendor} → {client}", got == client, got)
+check("пробелы по краям не мешают", clients.identify(" libopus 1.5.1\n") == "iPhone")
 for vendor, client in [("Lavf61.7.100", "Telegram Desktop"), ("tweb 2.2", "Telegram Web K"),
                        ("telegram-web-a 10.9.0", "Telegram Web A")]:
-    check(f"{vendor} → похоже на {client}", clients.identify(vendor) == clients.Guess(client, False))
+    check(f"{vendor} → {client} (другая версия)", clients.identify(vendor) == client)
 for vendor in ["libopus 1.5.2", "libopus", "Recorder", ""]:
     check(f"{vendor!r} не угадываем", clients.identify(vendor) is None, clients.identify(vendor))
-
-print("\n[7] Текст ответа")
-text = verdict("libopus 1.5.1")
-check("точное совпадение", text.startswith("✅ <b>iPhone</b>") and "<code>libopus 1.5.1</code>" in text, text)
-check("совпало семейство", verdict("Lavf61.7.100").startswith("🤔 Похоже на <b>Telegram Desktop</b>"))
-check("неизвестный", verdict("Recorder").startswith("🤷"))
-check("HTML из файла экранируется", "<code>&lt;b&gt;&amp;</code>" in verdict("<b>&"), verdict("<b>&"))
-check("длинная строка обрезается", len(verdict("q" * 5000)) < 400)
-check("непечатаемое заменяется", "<code>lib�opus�</code>" in verdict("lib\x00opus\n"), verdict("lib\x00opus\n"))
-check("пустая строка", "пустая строка" in verdict(""))
 
 print()
 if FAILS:

@@ -14,7 +14,6 @@ from aiogram.methods import TelegramMethod
 from aiogram.types import (Audio, Chat, Document, File, Message, Update, User,
                            Video, VideoNote, Voice)
 
-import mp4build as mb
 import ogg
 from voicebot import handlers
 
@@ -74,8 +73,6 @@ def update(chat=PRIVATE, **fields) -> Update:
 def voice(size: int) -> Voice:
     return Voice(file_id="v1", file_unique_id="u1", duration=3, mime_type="audio/ogg", file_size=size)
 
-def video_note(size: int) -> VideoNote:
-    return VideoNote(file_id="n1", file_unique_id="n1u", length=240, duration=9, file_size=size)
 
 
 async def main():
@@ -91,97 +88,71 @@ async def main():
         sent = session.sent()
         return sent[-1] if sent else None
 
-    print("\n[1] Голосовые")
+    print("\n[1] Голосовые: в ответе только телефон")
     data = ogg.voice("libopus 1.5.1")
     msg = await send(data, voice=voice(len(data)))
     check("скачал файл", session.names()[:2] == ["GetFile", "download"], session.names())
-    check("ответил: iPhone", msg and "✅ <b>iPhone</b>" in msg["text"], msg)
-    check("показал Vendor", msg and "<code>libopus 1.5.1</code>" in msg["text"])
+    check("ответ ровно «iPhone»", msg and msg["text"] == "iPhone", msg)
     check("ответ — реплаем на голосовое",
           msg and (msg.get("reply_parameters") or {}).get("message_id") == 10, msg)
-    check("разметка HTML", msg and msg.get("parse_mode") == "HTML", msg)
+    check("одно сообщение на голосовое", len(session.sent()) == 1, session.names())
 
-    data = ogg.voice("libopus unknown-fixed")
-    msg = await send(data, voice=voice(len(data)))
-    check("Android", msg and "<b>Android</b>" in msg["text"], msg)
+    for vendor, phone in [("libopus unknown-fixed", "Android"), ("libopus 1.3.1-fixed", "macOS"),
+                          ("libopus unknown", "Telegram X"), ("tweb", "Telegram Web K")]:
+        data = ogg.voice(vendor)
+        msg = await send(data, voice=voice(len(data)))
+        check(f"ответ ровно «{phone}»", msg and msg["text"] == phone, msg)
 
     data = (HERE / "ffmpeg.ogg").read_bytes()
     msg = await send(data, voice=voice(len(data)))
-    check("другая версия Lavf → похоже на Desktop",
-          msg and "🤔 Похоже на <b>Telegram Desktop</b>" in msg["text"], msg)
+    check("другая версия Lavf → «Telegram Desktop»", msg and msg["text"] == "Telegram Desktop", msg)
 
     data = ogg.voice("Recorder")
     msg = await send(data, voice=voice(len(data)))
-    check("неизвестный клиент", msg and msg["text"].startswith("🤷"), msg)
+    check("неизвестная строка → «Неизвестно»", msg and msg["text"] == handlers.UNKNOWN, msg)
 
-    print("\n[2] Файлы вместо голосовых")
-    data = ogg.voice("telegram-web-a")
+    print("\n[2] Всё, кроме голосовых, — молча")
+    note = VideoNote(file_id="n1", file_unique_id="n1u", length=240, duration=9, file_size=5000)
+    await send(video_note=note)
+    check("кружок: ни ответа, ни скачивания", session.calls == [], session.names())
+
+    vid = Video(file_id="vv1", file_unique_id="vv1u", width=240, height=240, duration=9, file_size=5000)
+    await send(video=vid)
+    check("видео: молчит", session.calls == [], session.names())
+
     doc = Document(file_id="d1", file_unique_id="u2", file_name="voice.ogg",
-                   mime_type="audio/ogg", file_size=len(data))
-    msg = await send(data, document=doc)
-    check(".ogg документом разбирается", msg and "Telegram Web A" in msg["text"], msg)
+                   mime_type="audio/ogg", file_size=1000)
+    await send(document=doc)
+    check(".ogg файлом: молчит", session.calls == [], session.names())
 
-    audio = Audio(file_id="a1", file_unique_id="u3", duration=3, file_name="rec.opus",
-                  mime_type="audio/opus", file_size=len(data))
-    msg = await send(data, audio=audio)
-    check(".opus аудиофайлом разбирается", msg and "Telegram Web A" in msg["text"], msg)
+    audio = Audio(file_id="a1", file_unique_id="u3", duration=3, file_name="song.mp3",
+                  mime_type="audio/mpeg", file_size=1000)
+    await send(audio=audio)
+    check("аудиофайл: молчит", session.calls == [], session.names())
 
-    pdf = Document(file_id="d2", file_unique_id="u4", file_name="report.pdf",
-                   mime_type="application/pdf", file_size=1000)
-    msg = await send(b"%PDF", document=pdf)
-    check("PDF не качает", "GetFile" not in session.names(), session.names())
-    check("PDF → подсказка", msg and msg["text"] == handlers.HELLO, msg)
+    await send(text="привет")
+    check("текст: молчит", session.calls == [], session.names())
 
-    mp3 = Audio(file_id="a2", file_unique_id="u5", duration=3, file_name="song.mp3",
-                mime_type="audio/mpeg", file_size=1000)
-    msg = await send(b"ID3", audio=mp3)
-    check("MP3 не качает", "GetFile" not in session.names(), session.names())
+    data = ogg.voice("libopus 1.5.1")
+    await send(data, chat=GROUP, voice=voice(len(data)))
+    check("в группах молчит", session.calls == [], session.names())
 
-    print("\n[2.5] Кружки и видео")
-    note_mp4 = (HERE / "note.mp4").read_bytes()
-    msg = await send(note_mp4, video_note=video_note(len(note_mp4)))
-    check("кружок скачан и разобран", session.names()[:2] == ["GetFile", "download"], session.names())
-    check("ответ про кружок/видео", msg and "кружок или видео" in msg["text"], msg)
-    check("честно про модель", msg and "не узнать" in msg["text"], msg)
-    check("показал кодировщик", msg and "libx264" in msg["text"], msg)
-    check("реплай на кружок", msg and (msg.get("reply_parameters") or {}).get("message_id") == 10, msg)
-
-    built = mb.file(encoder="TGram")
-    vid = Video(file_id="vv1", file_unique_id="vv1u", width=240, height=240, duration=9,
-                mime_type="video/mp4", file_name="clip.mp4", file_size=len(built))
-    msg = await send(built, video=vid)
-    check("видео разбирается", msg and "<code>TGram</code>" in msg["text"], msg)
-
-    doc = Document(file_id="dm1", file_unique_id="dm1u", file_name="circle.mp4",
-                   mime_type="video/mp4", file_size=len(built))
-    msg = await send(built, document=doc)
-    check(".mp4 документом → разбор MP4", msg and "кружок или видео" in msg["text"], msg)
-
-    msg = await send(b"not-an-mp4-at-all" + b"\x00" * 40, video_note=video_note(57))
-    check("битый кружок → NOT_MP4", msg and msg["text"] == handlers.NOT_MP4, msg)
+    msg = await send(text="/start")
+    check("/start → одна строка-подсказка", msg and msg["text"] == handlers.HELLO, msg)
 
     print("\n[3] Ошибки")
     msg = await send(b"ID3\x04" + b"\x00" * 50, voice=voice(54))
-    check("голосовое не Ogg/Opus", msg and msg["text"] == handlers.NOT_OPUS, msg)
+    check("голосовое не Ogg/Opus → «Неизвестно»", msg and msg["text"] == handlers.UNKNOWN, msg)
 
     msg = await send(b"", voice=voice(30 * 1024 * 1024))
     check("больше 20 МБ — не качает", "GetFile" not in session.names(), session.names())
-    check("больше 20 МБ — объясняет", msg and msg["text"] == handlers.TOO_BIG, msg)
+    check("больше 20 МБ → «Неизвестно»", msg and msg["text"] == handlers.UNKNOWN, msg)
 
     session.broken = True
     data = ogg.voice("libopus 1.5.1")
     msg = await send(data, voice=voice(len(data)))
     session.broken = False
-    check("сеть упала при скачивании", msg and msg["text"] == handlers.DOWNLOAD_FAILED, msg)
-
-    print("\n[4] Остальное")
-    msg = await send(text="/start")
-    check("/start → приветствие", msg and msg["text"] == handlers.HELLO, msg)
-    msg = await send(text="привет")
-    check("текст → подсказка", msg and msg["text"] == handlers.HELLO, msg)
-    data = ogg.voice("libopus 1.5.1")
-    await send(data, chat=GROUP, voice=voice(len(data)))
-    check("в группах молчит", session.calls == [], session.names())
+    check("сеть упала → просит переслать", msg and msg["text"] == handlers.DOWNLOAD_FAILED, msg)
 
     await bot.session.close()
 
