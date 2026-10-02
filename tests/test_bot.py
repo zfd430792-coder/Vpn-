@@ -11,8 +11,10 @@ import aiohttp
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import TelegramMethod
-from aiogram.types import Audio, Chat, Document, File, Message, Update, User, Voice
+from aiogram.types import (Audio, Chat, Document, File, Message, Update, User,
+                           Video, VideoNote, Voice)
 
+import mp4build as mb
 import ogg
 from voicebot import handlers
 
@@ -71,6 +73,9 @@ def update(chat=PRIVATE, **fields) -> Update:
 
 def voice(size: int) -> Voice:
     return Voice(file_id="v1", file_unique_id="u1", duration=3, mime_type="audio/ogg", file_size=size)
+
+def video_note(size: int) -> VideoNote:
+    return VideoNote(file_id="n1", file_unique_id="n1u", length=240, duration=9, file_size=size)
 
 
 async def main():
@@ -131,6 +136,29 @@ async def main():
                 mime_type="audio/mpeg", file_size=1000)
     msg = await send(b"ID3", audio=mp3)
     check("MP3 не качает", "GetFile" not in session.names(), session.names())
+
+    print("\n[2.5] Кружки и видео")
+    note_mp4 = (HERE / "note.mp4").read_bytes()
+    msg = await send(note_mp4, video_note=video_note(len(note_mp4)))
+    check("кружок скачан и разобран", session.names()[:2] == ["GetFile", "download"], session.names())
+    check("ответ про кружок/видео", msg and "кружок или видео" in msg["text"], msg)
+    check("честно про модель", msg and "не узнать" in msg["text"], msg)
+    check("показал кодировщик", msg and "libx264" in msg["text"], msg)
+    check("реплай на кружок", msg and (msg.get("reply_parameters") or {}).get("message_id") == 10, msg)
+
+    built = mb.file(encoder="TGram")
+    vid = Video(file_id="vv1", file_unique_id="vv1u", width=240, height=240, duration=9,
+                mime_type="video/mp4", file_name="clip.mp4", file_size=len(built))
+    msg = await send(built, video=vid)
+    check("видео разбирается", msg and "<code>TGram</code>" in msg["text"], msg)
+
+    doc = Document(file_id="dm1", file_unique_id="dm1u", file_name="circle.mp4",
+                   mime_type="video/mp4", file_size=len(built))
+    msg = await send(built, document=doc)
+    check(".mp4 документом → разбор MP4", msg and "кружок или видео" in msg["text"], msg)
+
+    msg = await send(b"not-an-mp4-at-all" + b"\x00" * 40, video_note=video_note(57))
+    check("битый кружок → NOT_MP4", msg and msg["text"] == handlers.NOT_MP4, msg)
 
     print("\n[3] Ошибки")
     msg = await send(b"ID3\x04" + b"\x00" * 50, voice=voice(54))
